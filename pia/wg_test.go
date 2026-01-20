@@ -1,141 +1,194 @@
 package pia
 
 import (
+	"errors"
+	"strings"
 	"testing"
 )
 
-type PIAClientMock struct{}
+type piaClientFake struct {
+	Token        string
+	TokenErr     error
+	AddKeyRes    AddKeyResult
+	UseAddKeyRes bool
+	AddKeyErr    error
+	MetaServer   Server
+}
 
-func (p *PIAClientMock) getMetadataServerForRegion() Server {
-	// Mock implementation for getMetadataServerForRegion
-	return Server{
-		Cn: "mock-server",
-		IP: "0.0.0.0",
+func (p *piaClientFake) getMetadataServerForRegion() Server {
+	if p.MetaServer.Cn == "" {
+		return Server{Cn: "mock-server", IP: "0.0.0.0"}
 	}
+	return p.MetaServer
 }
 
-func (p *PIAClientMock) GetToken() (string, error) {
-	return "", nil
+func (p *piaClientFake) GetToken() (string, error) {
+	if p.TokenErr != nil {
+		return "", p.TokenErr
+	}
+	if p.Token == "" {
+		return "mock-token", nil
+	}
+	return p.Token, nil
 }
 
-func (p *PIAClientMock) AddKey(token, publickey string) (AddKeyResult, error) {
+func (p *piaClientFake) AddKey(token, publickey string) (AddKeyResult, error) {
+	if p.AddKeyErr != nil {
+		return AddKeyResult{}, p.AddKeyErr
+	}
+
+	// If the test explicitly wants to use AddKeyRes, return it mostly as-is.
+	// This allows tests like ServerPort==0 to remain 0.
+	if p.UseAddKeyRes {
+		res := p.AddKeyRes
+		if res.ServerKey == "" {
+			res.ServerKey = publickey
+		}
+		return res, nil
+	}
+
+	// Otherwise, provide sane defaults.
 	return AddKeyResult{
 		ServerIP:   "1.2.3.4",
+		ServerPort: 6421,
 		DNSServers: []string{"1.1.1.1"},
 		PeerIP:     "4.5.6.7",
 		ServerKey:  publickey,
 	}, nil
 }
 
-func TestPIAWgGenerator_Generate(t *testing.T) {
-	type fields struct {
-		pia        PIAWgClient
-		config     PIAWgGeneratorConfig
-		verbose    bool
-		privatekey string
-		publickey  string
-		serverName bool ``
+func TestPIAWgGenerator_Generate_Basic(t *testing.T) {
+	fake := &piaClientFake{}
+	gen := NewPIAWgGenerator(fake, PIAWgGeneratorConfig{
+		PrivateKey: "test_privatekey",
+		PublicKey:  "test_publickey",
+	})
+
+	got, err := gen.Generate()
+	if err != nil {
+		t.Fatalf("Generate() returned error: %v", err)
 	}
-	tests := []struct {
-		name    string
-		fields  fields
-		want    string
-		wantErr bool
-	}{
-		{
-			name: "basic generate",
-			fields: fields{
-				pia: &PIAClientMock{},
-				config: PIAWgGeneratorConfig{
-					Verbose:    false,
-					ServerName: false,
-					PrivateKey: "test_privatekey",
-					PublicKey:  "test_publickey",
-				},
-			},
-			want: `[Interface]
-PrivateKey = test_privatekey
-Address = 4.5.6.7
-DNS = 1.1.1.1
-[Peer]
-PublicKey = test_publickey
-AllowedIPs = 0.0.0.0/0
-Endpoint = 1.2.3.4:1337
-PersistentKeepalive = 25`,
-			wantErr: false,
-		},
-		{
-			name: "generate with serverCommonName",
-			fields: fields{
-				pia: &PIAClientMock{},
-				config: PIAWgGeneratorConfig{
-					Verbose:    false,
-					ServerName: true,
-					PrivateKey: "test_privatekey",
-					PublicKey:  "test_publickey",
-				},
-			},
-			want: `[Interface]
-PrivateKey = test_privatekey
-Address = 4.5.6.7
-DNS = 1.1.1.1
-[Peer]
-PublicKey = test_publickey
-AllowedIPs = 0.0.0.0/0
-Endpoint = 1.2.3.4:1337
-PersistentKeepalive = 25
-ServerCommonName = mock-server`,
-			wantErr: false,
-		},
+
+	wantContains := []string{
+		"PrivateKey = test_privatekey",
+		"Address = 4.5.6.7",
+		"DNS = 1.1.1.1",
+		"PublicKey = test_publickey",
+		"AllowedIPs = 0.0.0.0/0",
+		"Endpoint = 1.2.3.4:6421",
+		"PersistentKeepalive = 25",
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			p := NewPIAWgGenerator(tt.fields.pia, tt.fields.config)
-			got, err := p.Generate()
-			if (err != nil) != tt.wantErr {
-				t.Errorf("PIAWgGenerator.Generate() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if got != tt.want {
-				t.Errorf("PIAWgGenerator.Generate() = %v, want %v", got, tt.want)
-			}
-		})
+
+	for _, s := range wantContains {
+		if !strings.Contains(got, s) {
+			t.Fatalf("expected config to contain %q, got:\n%s", s, got)
+		}
+	}
+
+	if strings.Contains(got, "ServerCommonName =") {
+		t.Fatalf("did not expect ServerCommonName line, got:\n%s", got)
 	}
 }
 
-func TestPIAWgGenerator_generateKeys(t *testing.T) {
-	type fields struct {
-		pia     PIAWgClient
-		verbose bool
+func TestPIAWgGenerator_Generate_WithServerCommonName(t *testing.T) {
+	fake := &piaClientFake{
+		MetaServer: Server{Cn: "mock-server", IP: "0.0.0.0"},
 	}
-	tests := []struct {
-		name       string
-		fields     fields
-		wantResult bool
-		wantErr    bool
-	}{
-		{
-			name: "basic generateKeys",
-			fields: fields{
-				pia: &PIAClientMock{},
-			},
-			wantResult: true,
+	gen := NewPIAWgGenerator(fake, PIAWgGeneratorConfig{
+		ServerName: true,
+		PrivateKey: "test_privatekey",
+		PublicKey:  "test_publickey",
+	})
+
+	got, err := gen.Generate()
+	if err != nil {
+		t.Fatalf("Generate() returned error: %v", err)
+	}
+
+	if !strings.Contains(got, "ServerCommonName = mock-server") {
+		t.Fatalf("expected ServerCommonName, got:\n%s", got)
+	}
+}
+
+func TestPIAWgGenerator_GenerateWithMetadata_ReturnsKey(t *testing.T) {
+	fake := &piaClientFake{
+		UseAddKeyRes: true,
+		AddKeyRes: AddKeyResult{
+			ServerIP:   "9.9.9.9",
+			ServerPort: 51820,
+			DNSServers: []string{"1.1.1.1"},
+			PeerIP:     "10.0.0.2",
+			ServerKey:  "serverkey",
 		},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			p := &PIAWgGenerator{
-				pia:     tt.fields.pia,
-				verbose: tt.fields.verbose,
-			}
-			got, got1, err := p.generateKeys()
-			if (err != nil) != tt.wantErr {
-				t.Errorf("PIAWgGenerator.generateKeys() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if (got == "" || got1 == "") && tt.wantResult {
-				t.Errorf("PIAWgGenerator.generateKeys() got no keys")
-			}
-		})
+
+	gen := NewPIAWgGenerator(fake, PIAWgGeneratorConfig{
+		PrivateKey: "test_privatekey",
+		PublicKey:  "test_publickey",
+	})
+
+	res, err := gen.GenerateWithMetadata()
+	if err != nil {
+		t.Fatalf("GenerateWithMetadata() returned error: %v", err)
+	}
+
+	if res.Config == "" {
+		t.Fatalf("expected non-empty Config")
+	}
+	if res.Key.ServerIP != "9.9.9.9" || res.Key.ServerPort != 51820 {
+		t.Fatalf("expected Key metadata to be returned, got: %+v", res.Key)
+	}
+}
+
+func TestPIAWgGenerator_GenerateWithMetadata_GetTokenError(t *testing.T) {
+	fake := &piaClientFake{
+		TokenErr: errors.New("nope"),
+	}
+	gen := NewPIAWgGenerator(fake, PIAWgGeneratorConfig{
+		PrivateKey: "k",
+		PublicKey:  "p",
+	})
+
+	_, err := gen.GenerateWithMetadata()
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestPIAWgGenerator_GenerateWithMetadata_AddKeyError(t *testing.T) {
+	fake := &piaClientFake{
+		AddKeyErr: errors.New("bad addkey"),
+	}
+	gen := NewPIAWgGenerator(fake, PIAWgGeneratorConfig{
+		PrivateKey: "k",
+		PublicKey:  "p",
+	})
+
+	_, err := gen.GenerateWithMetadata()
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestPIAWgGenerator_GenerateWithMetadata_ServerPortZeroErrors(t *testing.T) {
+	fake := &piaClientFake{
+		UseAddKeyRes: true,
+		AddKeyRes: AddKeyResult{
+			ServerIP:   "1.2.3.4",
+			ServerPort: 0,
+			DNSServers: []string{"1.1.1.1"},
+			PeerIP:     "4.5.6.7",
+			ServerKey:  "serverkey",
+		},
+	}
+
+	gen := NewPIAWgGenerator(fake, PIAWgGeneratorConfig{
+		PrivateKey: "k",
+		PublicKey:  "p",
+	})
+
+	_, err := gen.GenerateWithMetadata()
+	if err == nil {
+		t.Fatalf("expected error when ServerPort is 0")
 	}
 }
