@@ -1,4 +1,4 @@
-module github.com/Ephemeral-Dust/pia-wg-config
+module github.com/thecodingrasta/pia-wg-config-generator
 
 go 1.21
 

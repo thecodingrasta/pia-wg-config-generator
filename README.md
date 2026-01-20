@@ -1,4 +1,4 @@
-# PIA-WgConfigGenerator
+# PIA-Wg-Config-Generator
 
 **A WireGuard config generator and sidecar daemon for Private Internet Access (PIA), designed for Docker, Routers and long-running tunnels.**
 
@@ -14,7 +14,7 @@ This project bridges that gap by generating WireGuard configurations using PIA�
 PIA’s WireGuard implementation requires:
 - authenticating with the PIA API,
 - registering a client-generated WireGuard public key,
-- dynamically retrieving server, gateway, and DNS information,
+- dynamically retrieving server, gateway and DNS information,
 - and (where supported) maintaining rolling port-forwarding leases.
 
 This makes static, “download once and forget” configurations impractical.
@@ -28,12 +28,12 @@ This project exists to:
 
 ## Features
 
-- Generate WireGuard configurations for PIA using official server metadata
-- Select regions by name or ID
-- Restrict selection to port-forwarding capable regions
-- Optional inclusion of server identity metadata
+- Generates WireGuard configs for PIA using official server metadata
 - Designed for Docker, Gluetun, Routers and headless systems
-- Written in Go as a single self-contained binary
+- Ability to restrict servers to port-forwarding capable regions
+- Optional inclusion of server identity metadata
+- Ability to select regions by name or ID
+- Written in Go as a single self-contained binary (also my first Go project!)
 
 > ⚠️ **Important** ⚠️
 >
@@ -64,7 +64,6 @@ The resulting wg0.conf can be used with WireGuard directly or mounted into a VPN
 
 - Docker stacks using a VPN gateway container
 - Gluetun-based WireGuard setups
-- Seedboxes and torrent clients requiring port forwarding
 - Routers and firewalls with WireGuard support
 - Headless or server environments replacing OpenVPN with WireGuard
 
