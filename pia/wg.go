@@ -2,14 +2,12 @@ package pia
 
 import (
 	"bytes"
-	"fmt"
 	"log"
-
+	"strings"
 	"text/template"
 
-	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
-
 	"github.com/pkg/errors"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
 type PIAWgGenerator struct {
@@ -32,10 +30,16 @@ type templateConfig struct {
 	AllowedIPs          string
 	DNS                 string
 	Endpoint            string
+	EndpointPort        int
 	PrivateKey          string
 	PublicKey           string
 	PersistentKeepalive string
 	ServerCommonName    string
+}
+
+type GenerateResult struct {
+	Config string
+	Key    AddKeyResult
 }
 
 func NewPIAWgGenerator(pia PIAWgClient, config PIAWgGeneratorConfig) *PIAWgGenerator {
@@ -48,48 +52,56 @@ func NewPIAWgGenerator(pia PIAWgClient, config PIAWgGeneratorConfig) *PIAWgGener
 	}
 }
 
-// Generate
+// Generate - retains backwards compatibility (string only).
 func (p *PIAWgGenerator) Generate() (string, error) {
-	// Get PIA token
+	result, err := p.GenerateWithMetadata()
+	if err != nil {
+		return "", err
+	}
+	return result.Config, nil
+}
+
+// GenerateWithMetadata returns both the config and the AddKeyResult metadata (required for Port Forwarding).
+func (p *PIAWgGenerator) GenerateWithMetadata() (GenerateResult, error) {
+	var result GenerateResult
+
 	if p.verbose {
 		log.Println("Getting PIA token")
 	}
 	token, err := p.pia.GetToken()
 	if err != nil {
-		return "", errors.Wrap(err, "error getting PIA token")
+		return result, errors.Wrap(err, "Error Getting Pia Token")
 	}
 
-	// Generate Wireguard keys
 	if p.verbose {
-		log.Println("Generating Wireguard keys")
+		log.Println("Generating WireGuard keys")
 	}
 	privatekey, publickey, err := p.generateKeys()
 	if err != nil {
-		return "", errors.Wrap(err, "error generating Wireguard keys")
+		return result, errors.Wrap(err, "Error Generating WireGuard Keys")
 	}
 
-	// Add Wireguard publickey to PIA account
 	if p.verbose {
-		log.Println("Adding Wireguard publickey to PIA account")
+		log.Println("Registering Wire Guard Public Key With PIA")
 	}
 	key, err := p.pia.AddKey(token, publickey)
 	if err != nil {
-		return "", errors.Wrap(err, "error adding Wireguard publickey to PIA account")
+		return result, errors.Wrap(err, "Error Adding WireGuard Public Key To PIA Account")
 	}
 
-	// Generate Wireguard config
 	if p.verbose {
-		log.Println("Generating Wireguard config")
+		log.Println("Generating WireGuard config")
 	}
 	config, err := p.generateConfig(key, privatekey)
 	if err != nil {
-		return "", errors.Wrap(err, "error generating Wireguard config")
+		return result, errors.Wrap(err, "Error Generating Wire Guard Config")
 	}
 
-	return config, nil
+	result.Config = config
+	result.Key = key
+	return result, nil
 }
 
-// generateKeys
 func (p *PIAWgGenerator) generateKeys() (string, string, error) {
 	if p.privatekey != "" && p.publickey != "" {
 		return p.privatekey, p.publickey, nil
@@ -97,29 +109,24 @@ func (p *PIAWgGenerator) generateKeys() (string, string, error) {
 
 	privateKey, err := wgtypes.GeneratePrivateKey()
 	if err != nil {
-		return "", "", errors.Wrap(err, fmt.Sprintf("failed to generate private key: %v", privateKey.String()))
+		return "", "", errors.Wrap(err, "Failed To Generate Private Key")
 	}
 	if p.verbose {
-		log.Println("Private key: ", privateKey)
+		log.Println("Private Key Generated")
 	}
 
-	// Call host 'wg pubkey' to generate public key
 	publicKey := privateKey.PublicKey()
-	if err != nil {
-		return "", "", errors.Wrap(err, fmt.Sprintf("failed to generate public key: %v", publicKey.String()))
-	}
 	if p.verbose {
-		log.Println("Public key: ", publicKey)
+		log.Println("Public Key Generated")
 	}
 
 	return privateKey.String(), publicKey.String(), nil
 }
 
-// generateConfig
 func (p *PIAWgGenerator) generateConfig(key AddKeyResult, privatekey string) (string, error) {
-	template, err := template.New("config").Parse(wireguardConfigTemplate)
+	tpl, err := template.New("config").Parse(wireguardConfigTemplate)
 	if err != nil {
-		return "", errors.Wrap(err, "error parsing wireguard config template")
+		return "", errors.Wrap(err, "Error Parsing WireGuard Config Template")
 	}
 
 	var serverCommonName string
@@ -128,11 +135,22 @@ func (p *PIAWgGenerator) generateConfig(key AddKeyResult, privatekey string) (st
 		serverCommonName = server.Cn
 	}
 
-	// execute template
+	endpointPort := key.ServerPort
+	if endpointPort <= 0 {
+		return "", errors.New("Invalid Server Port Returned By API")
+	}
+	if strings.TrimSpace(key.ServerIP) == "" {
+		return "", errors.New("Invalid Server IP Returned By API")
+	}
+	if len(key.DNSServers) == 0 || strings.TrimSpace(key.DNSServers[0]) == "" {
+		return "", errors.New("No DNS Servers Returned By API")
+	}
+
 	tc := templateConfig{
 		PrivateKey:          privatekey,
 		PublicKey:           key.ServerKey,
 		Endpoint:            key.ServerIP,
+		EndpointPort:        endpointPort,
 		DNS:                 key.DNSServers[0],
 		Address:             key.PeerIP,
 		AllowedIPs:          "0.0.0.0/0",
@@ -140,13 +158,12 @@ func (p *PIAWgGenerator) generateConfig(key AddKeyResult, privatekey string) (st
 		ServerCommonName:    serverCommonName,
 	}
 
-	var config bytes.Buffer
-	err = template.Execute(&config, tc)
-	if err != nil {
-		return "", errors.Wrap(err, "error executing wireguard config template")
+	var buf bytes.Buffer
+	if err := tpl.Execute(&buf, tc); err != nil {
+		return "", errors.Wrap(err, "Error Executing WireGuard Config Template")
 	}
 
-	return config.String(), nil
+	return buf.String(), nil
 }
 
 var wireguardConfigTemplate = `[Interface]
@@ -156,7 +173,7 @@ DNS = {{.DNS}}
 [Peer]
 PublicKey = {{.PublicKey}}
 AllowedIPs = {{.AllowedIPs}}
-Endpoint = {{.Endpoint}}:1337
+Endpoint = {{.Endpoint}}:{{.EndpointPort}}
 PersistentKeepalive = {{.PersistentKeepalive}}
 {{- if .ServerCommonName }}
 ServerCommonName = {{.ServerCommonName}}
