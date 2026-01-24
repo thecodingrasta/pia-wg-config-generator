@@ -2,8 +2,10 @@ package pia
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 type piaClientFake struct {
@@ -50,11 +52,18 @@ func (p *piaClientFake) AddKey(token, publickey string) (AddKeyResult, error) {
 	// Otherwise, provide sane defaults.
 	return AddKeyResult{
 		ServerIP:   "1.2.3.4",
-		ServerPort: 6421,
+		ServerPort: 1337,
 		DNSServers: []string{"1.1.1.1"},
 		PeerIP:     "4.5.6.7",
 		ServerKey:  publickey,
 	}, nil
+}
+
+func (p *piaClientFake) LogLine(enabled bool, msg string) {
+	if !enabled {
+		return
+	}
+	fmt.Println(time.Now().Format("2006/01/02 15:04:05"), msg)
 }
 
 func TestPIAWgGenerator_Generate_Basic(t *testing.T) {
@@ -75,7 +84,7 @@ func TestPIAWgGenerator_Generate_Basic(t *testing.T) {
 		"DNS = 1.1.1.1",
 		"PublicKey = test_publickey",
 		"AllowedIPs = 0.0.0.0/0",
-		"Endpoint = 1.2.3.4:6421",
+		"Endpoint = 1.2.3.4:1337",
 		"PersistentKeepalive = 25",
 	}
 
