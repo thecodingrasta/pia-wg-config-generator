@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -32,11 +33,17 @@ type PIAClient struct {
 	region           string
 	wireguardServers ServerList
 	metadataServers  ServerList
+	rawServerList    PIAServerList // cached so GetAvailableRegions never re-fetches
 	username         string
 	password         string
 	verbose          bool
 	portForwarding   bool
 	caCert           []byte
+	// curlPath is the path to an OpenSSL-compiled curl binary. If empty, only
+	// the system curl is tried. Set via the CURL_PATH environment variable —
+	// required on Windows where the inbox curl uses Schannel/LibreSSL and
+	// PIA's WAF rejects it.
+	curlPath string
 }
 
 type PIAServerList struct {
@@ -80,7 +87,9 @@ type Server struct {
 	IP string
 }
 
-// NewPIAClient
+// NewPIAClient constructs a client, fetches the server list once, and resolves
+// the requested region. All subsequent calls reuse the cached list.
+// Set the CURL_PATH env var to point at an OpenSSL curl binary on Windows.
 func NewPIAClient(username, password, region string, verbose bool, portForwarding bool) (*PIAClient, error) {
 	piaClient := PIAClient{
 		username:       username,
@@ -88,20 +97,20 @@ func NewPIAClient(username, password, region string, verbose bool, portForwardin
 		region:         region,
 		verbose:        verbose,
 		portForwarding: portForwarding,
+		curlPath:       strings.TrimSpace(os.Getenv("CURL_PATH")),
 	}
 
-	// Get list of servers
 	serverList, err := piaClient.getServerList()
 	if err != nil {
 		return nil, err
 	}
+	piaClient.rawServerList = serverList
 
 	piaClient.region, err = piaClient.resolveRegionID(region, serverList)
 	if err != nil {
 		return nil, err
 	}
 
-	// Set servers
 	piaClient.metadataServers, err = piaClient.generateMetadataServerList(serverList)
 	if err != nil {
 		return nil, err
@@ -115,52 +124,101 @@ func NewPIAClient(username, password, region string, verbose bool, portForwardin
 	return &piaClient, nil
 }
 
-// GetToken
+// LogLine logs msg via the standard logger if verbose is true.
+// It is called by token_fetcher.go and any other internal code that needs
+// conditional verbosity without scattering if-checks everywhere.
+func (p *PIAClient) LogLine(verbose bool, msg string) {
+	if verbose {
+		log.Print(msg)
+	}
+}
+
+// GetToken returns a valid PIA auth token, trying three strategies in order:
+//
+//  1. In-process token cache (avoids any network call for repeated calls within
+//     the same 23-hour window — important because the daemon calls GetToken
+//     twice per refresh cycle: once for AddKey and once for PF).
+//
+//  2. Curl-based fetch against PIA's public API endpoint. This path handles
+//     Windows correctly by using an OpenSSL curl if CURL_PATH is set (PIA's
+//     WAF rejects Schannel/LibreSSL TLS fingerprints).
+//
+//  3. Fallback: regional metadata server via Go's native TLS with PIA's CA cert
+//     pinned. Works reliably on Linux/macOS where Go's TLS is accepted.
 func (p *PIAClient) GetToken() (string, error) {
-	server := p.getMetadataServerForRegion()
-
-	url := fmt.Sprintf("https://%v/authv3/generateToken", server.Cn)
-
-	// Send Request
-	resp, err := p.executePIARequest(server, url, "")
-	if err != nil {
-		return "", errors.Wrap(err, "error executing request")
+	// 1. Cache hit — no network call needed.
+	if token, _, err := readCachedToken(time.Now()); err == nil {
+		p.LogLine(p.verbose, "PIA: using cached token")
+		return token, nil
 	}
 
-	// Parse Response
+	// 2. Curl path (public endpoint; handles Windows WAF / OpenSSL requirement).
+	token, curlErr := p.fetchTokenViaCurl(context.Background())
+	if curlErr == nil {
+		_ = writeCachedToken(token, 23*time.Hour)
+		return token, nil
+	}
+
+	// Rate-limiting is fatal — a fallback attempt would only make it worse.
+	if curlErr == ErrTooManyAttempts {
+		return "", curlErr
+	}
+
+	p.LogLine(p.verbose, fmt.Sprintf("curl token fetch failed (%v); falling back to metadata server", curlErr))
+
+	// 3. Metadata server fallback (regional server, CA-cert-pinned TLS).
+	token, err := p.getTokenFromMetadataServer()
+	if err != nil {
+		return "", fmt.Errorf("all token methods failed — curl: %v; metadata server: %v", curlErr, err)
+	}
+
+	_ = writeCachedToken(token, 23*time.Hour)
+	return token, nil
+}
+
+// getTokenFromMetadataServer authenticates against the regional PIA metadata
+// server using Basic Auth over CA-cert-pinned TLS. This is the original
+// token endpoint and works reliably on Linux/macOS.
+func (p *PIAClient) getTokenFromMetadataServer() (string, error) {
+	server := p.getMetadataServerForRegion()
+	u := fmt.Sprintf("https://%v/authv3/generateToken", server.Cn)
+
+	resp, err := p.executePIARequest(server, u, "")
+	if err != nil {
+		return "", errors.Wrap(err, "metadata server token request failed")
+	}
+
 	var tokenResp struct {
 		Token string `json:"token"`
 	}
-
-	err = json.NewDecoder(resp.Body).Decode(&tokenResp)
-	if err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
 		return "", errors.Wrap(err, "error decoding token response")
 	}
-
-	if p.verbose {
-		log.Print("Got token: ", tokenResp.Token)
+	if tokenResp.Token == "" {
+		return "", errors.New("metadata server returned an empty token — check your credentials")
 	}
 
+	p.LogLine(p.verbose, "Got token via metadata server")
 	return tokenResp.Token, nil
 }
 
-// AddKey
+// AddKey registers a WireGuard public key with PIA and returns peer config metadata.
 func (p *PIAClient) AddKey(token, publickey string) (AddKeyResult, error) {
 	var addKeyResp AddKeyResult
 	server := p.getWireguardServerForRegion()
 
-	// Build HTTP Request
-	url := fmt.Sprintf("https://%v:6421/addKey?pt=%v&pubkey=%v", server.Cn, url.QueryEscape(token), url.QueryEscape(publickey))
+	u := fmt.Sprintf("https://%v:1337/addKey?pt=%v&pubkey=%v",
+		server.Cn,
+		url.QueryEscape(token),
+		url.QueryEscape(publickey),
+	)
 
-	// Send Request
-	resp, err := p.executePIARequest(server, url, token)
+	resp, err := p.executePIARequest(server, u, token)
 	if err != nil {
 		return addKeyResp, errors.Wrap(err, "Error Executing Request")
 	}
 
-	// Parse Response
-	err = json.NewDecoder(resp.Body).Decode(&addKeyResp)
-	if err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&addKeyResp); err != nil {
 		return addKeyResp, errors.Wrap(err, "Error Decoding Add Key Response")
 	}
 
@@ -181,7 +239,8 @@ func (p *PIAClient) getMetadataServerForRegion() Server {
 	return p.metadataServers[Region(p.region)][0]
 }
 
-// getSeverList returns a list of servers from the PIA API
+// getServerList fetches the live PIA server list and strips the trailing
+// base64 blob that PIA appends after the JSON object.
 func (p *PIAClient) getServerList() (PIAServerList, error) {
 	var serverList PIAServerList
 
@@ -189,27 +248,28 @@ func (p *PIAClient) getServerList() (PIAServerList, error) {
 	if err != nil {
 		return PIAServerList{}, err
 	}
+	defer resp.Body.Close()
 
-	// Strip the base64 garbage
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return PIAServerList{}, err
 	}
+
+	// Strip the base64 blob appended after the closing brace.
 	respString := string(respBytes)
 	lastBracketInd := strings.LastIndex(respString, "}")
+	if lastBracketInd < 0 {
+		return PIAServerList{}, errors.New("getServerList: response contained no JSON object")
+	}
 	safeJSON := respString[:lastBracketInd+1]
 
-	// Parse the JSON
-	err = json.Unmarshal([]byte(safeJSON), &serverList)
-	if err != nil {
+	if err := json.Unmarshal([]byte(safeJSON), &serverList); err != nil {
 		return PIAServerList{}, err
 	}
 
-	// Return list of servers
 	return serverList, nil
 }
 
-// generateWireguardServerList
 func (p *PIAClient) generateWireguardServerList(list PIAServerList) (ServerList, error) {
 	servers := ServerList{}
 
@@ -217,7 +277,6 @@ func (p *PIAClient) generateWireguardServerList(list PIAServerList) (ServerList,
 		if p.portForwarding && !r.PortForward {
 			continue
 		}
-
 		for _, server := range r.Servers.Wg {
 			servers[Region(r.ID)] = append(servers[Region(r.ID)], Server{
 				Cn: server.Cn,
@@ -236,7 +295,6 @@ func (p *PIAClient) generateWireguardServerList(list PIAServerList) (ServerList,
 	return servers, nil
 }
 
-// generateMetadataServerList
 func (p *PIAClient) generateMetadataServerList(list PIAServerList) (ServerList, error) {
 	servers := ServerList{}
 
@@ -244,7 +302,6 @@ func (p *PIAClient) generateMetadataServerList(list PIAServerList) (ServerList, 
 		if p.portForwarding && !r.PortForward {
 			continue
 		}
-
 		for _, server := range r.Servers.Meta {
 			servers[Region(r.ID)] = append(servers[Region(r.ID)], Server{
 				Cn: server.Cn,
@@ -263,30 +320,29 @@ func (p *PIAClient) generateMetadataServerList(list PIAServerList) (ServerList, 
 	return servers, nil
 }
 
-func (p *PIAClient) executePIARequest(server Server, url, token string) (*http.Response, error) {
-	req, err := http.NewRequest("GET", url, nil)
+func (p *PIAClient) executePIARequest(server Server, rawURL, token string) (*http.Response, error) {
+	req, err := http.NewRequest("GET", rawURL, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	// Set header to JSON
 	req.Header.Set("Content-Type", "application/json")
 
-	// Set basic auth
+	// Use Basic Auth only for the token endpoint (token == "").
+	// For subsequent calls the token is passed as a query parameter.
 	if token == "" {
 		req.SetBasicAuth(p.username, p.password)
 	}
 
-	// Add certificate to shared pool
-	err = p.downloadPIACertificate()
-	if err != nil {
+	if err := p.downloadPIACertificate(); err != nil {
 		return nil, errors.Wrap(err, "Error Downloading CA Certificate")
 	}
 
 	caCertPool := x509.NewCertPool()
 	caCertPool.AppendCertsFromPEM(p.caCert)
 
-	// Create DNS resolver for PIA addresses
+	// Build a custom DNS resolver that maps the server's CN directly to its
+	// IP address, bypassing public DNS (which may not resolve PIA's internal CNs).
 	zone := &dns.Zone{
 		Origin: "",
 		TTL:    5 * time.Minute,
@@ -307,65 +363,53 @@ func (p *PIAClient) executePIARequest(server Server, url, token string) (*http.R
 		}).Dial,
 	}
 
-	// Set custom DNS server
-	dialer := &net.Dialer{
-		Resolver: resolver,
-	}
-
+	dialer := &net.Dialer{Resolver: resolver}
 	dialContext := func(ctx context.Context, network, addr string) (net.Conn, error) {
 		return dialer.DialContext(ctx, network, addr)
 	}
 
 	client := &http.Client{
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				RootCAs: caCertPool,
-			},
-			DialContext: dialContext,
+			TLSClientConfig: &tls.Config{RootCAs: caCertPool},
+			DialContext:     dialContext,
 		},
 	}
 
-	// Execute the request
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 
-	// Log the response body
+	// Buffer the body so callers can re-read it and we can inspect it here.
 	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
 	if err != nil {
 		return nil, err
 	}
 	resp.Body = io.NopCloser(bytes.NewReader(body))
 
-	// Return error if status code is not 200
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("Status Code %v, Response Body: %s", resp.StatusCode, string(body))
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %v: %s", resp.StatusCode, string(body))
 	}
 
 	return resp, nil
 }
 
-// downloadPIACertificate downloads the PIA certificate
+// downloadPIACertificate lazily fetches PIA's CA certificate from their
+// official GitHub repo. Subsequent calls are no-ops (cached on the struct).
 func (p *PIAClient) downloadPIACertificate() error {
-	// caCert already loaded
 	if len(p.caCert) > 0 {
 		return nil
 	}
 
-	// Download certificate
 	resp, err := http.Get("https://raw.githubusercontent.com/pia-foss/desktop/master/daemon/res/ca/rsa_4096.crt")
 	if err != nil {
 		return err
 	}
+	defer resp.Body.Close()
 
-	// Parse certificate
 	p.caCert, err = io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return err
 }
 
 func (p *PIAClient) resolveRegionID(input string, list PIAServerList) (string, error) {
@@ -388,14 +432,11 @@ func (p *PIAClient) resolveRegionID(input string, list PIAServerList) (string, e
 	return "", errors.New("Unknown Region: " + input)
 }
 
+// GetAvailableRegions returns region metadata using the already-cached server
+// list — no additional network call is made.
 func (p *PIAClient) GetAvailableRegions() ([]RegionInfo, error) {
-	serverList, err := p.getServerList()
-	if err != nil {
-		return nil, err
-	}
-
-	regions := make([]RegionInfo, 0, len(serverList.Regions))
-	for _, r := range serverList.Regions {
+	regions := make([]RegionInfo, 0, len(p.rawServerList.Regions))
+	for _, r := range p.rawServerList.Regions {
 		regions = append(regions, RegionInfo{
 			ID:          r.ID,
 			Name:        r.Name,
@@ -404,6 +445,5 @@ func (p *PIAClient) GetAvailableRegions() ([]RegionInfo, error) {
 			PortForward: r.PortForward,
 		})
 	}
-
 	return regions, nil
 }

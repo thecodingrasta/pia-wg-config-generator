@@ -33,10 +33,11 @@ type PFClient struct {
 }
 
 func NewPFClient(verbose bool) *PFClient {
-	// PIA docs use curl -k; we mirror that here.
+	// PIA's gateway uses an internal certificate; InsecureSkipVerify mirrors
+	// the PIA docs that use curl -k for the port-forwarding endpoints.
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true, // Gateway uses internal cert, aligning with the PIA docs
+			InsecureSkipVerify: true, //nolint:gosec
 		},
 	}
 
@@ -46,6 +47,9 @@ func NewPFClient(verbose bool) *PFClient {
 	}
 }
 
+// GetSignature requests a port-forwarding lease from the gateway. It returns
+// the raw signature response (needed for repeated BindPort renewals) and the
+// decoded payload (which contains the assigned port number).
 func (p *PFClient) GetSignature(gateway string, token string) (PFSignatureResponse, PFPayload, error) {
 	var sig PFSignatureResponse
 	var payload PFPayload
@@ -85,6 +89,9 @@ func (p *PFClient) GetSignature(gateway string, token string) (PFSignatureRespon
 	return sig, payload, nil
 }
 
+// BindPort keeps a port-forwarding lease alive. It must be called with the
+// same PFSignatureResponse returned by GetSignature, roughly every 15 minutes.
+// PIA's gateway returns a JSON body even on success; we verify the status field.
 func (p *PFClient) BindPort(gateway string, sig PFSignatureResponse) error {
 	gw := normalizeGateway(gateway)
 	if gw == "" {
@@ -106,7 +113,19 @@ func (p *PFClient) BindPort(gateway string, sig PFSignatureResponse) error {
 		return fmt.Errorf("bindPort failed: %s", resp.Status)
 	}
 
-	return resp.Body.Close()
+	// The gateway returns {"status":"OK","message":"..."} — verify explicitly.
+	var bindResp struct {
+		Status  string `json:"status"`
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&bindResp); err != nil {
+		return errors.Wrap(err, "failed to decode bindPort response")
+	}
+	if bindResp.Status != "OK" {
+		return fmt.Errorf("bindPort returned status %q: %s", bindResp.Status, bindResp.Message)
+	}
+
+	return nil
 }
 
 func normalizeGateway(gateway string) string {
@@ -115,11 +134,11 @@ func normalizeGateway(gateway string) string {
 		return ""
 	}
 
-	// retain normal 'host:port' values.
+	// Already has a port — use as-is.
 	if _, _, err := net.SplitHostPort(gw); err == nil {
 		return gw
 	}
 
-	// Otherwise default to PIA PF port.
+	// Default to PIA's port-forwarding port.
 	return gw + ":19999"
 }

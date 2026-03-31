@@ -64,14 +64,14 @@ test:
 test-both:
 	@echo "$(GREEN)==> Running unit tests$(RESET)"
 	$(GO) test $(GOFLAGS) $(PKG)
-	$(GO) test-integration
+	$(MAKE) test-integration
 
 .PHONY: test-all
 test-all:
 	@echo "$(GREEN)==> Running unit tests$(RESET)"
 	$(GO) test $(GOFLAGS) $(PKG)
-	$(GO) test-integration
-	$(GO) test-system-wg
+	$(MAKE) test-integration
+	$(MAKE) test-wgquick
 
 .PHONY: test-race
 test-race:

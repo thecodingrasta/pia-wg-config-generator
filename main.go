@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/thecodingrasta/pia-wg-config-generator/pia"
@@ -28,15 +29,41 @@ const (
 	defaultConfigFileName   = "wg0.conf"
 	defaultForwardedPortOut = "forwarded_port"
 
-	// PIA requires bindPort roughly every 15m. We renew at 14m to be safe.
+	// PIA requires BindPort roughly every 15 minutes. We renew at 14m to be safe.
 	defaultPFRenewInterval = 14 * time.Minute
 )
 
+// pfLeaseState holds the data needed to renew a port-forwarding lease.
+// It is written by the main daemon goroutine and read by the renew goroutine,
+// so all access must go through the helper methods that hold the mutex.
 type pfLeaseState struct {
-	Enabled   bool
-	Gateway   string
-	Signature pia.PFSignatureResponse
-	Port      string
+	mu        sync.Mutex
+	enabled   bool
+	gateway   string
+	signature pia.PFSignatureResponse
+	port      string
+}
+
+func (s *pfLeaseState) set(gateway string, sig pia.PFSignatureResponse, port string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.enabled = true
+	s.gateway = gateway
+	s.signature = sig
+	s.port = port
+}
+
+func (s *pfLeaseState) disable() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.enabled = false
+}
+
+// snapshot returns a consistent copy of the lease state for the renew goroutine.
+func (s *pfLeaseState) snapshot() (enabled bool, gateway string, sig pia.PFSignatureResponse, port string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.enabled, s.gateway, s.signature, s.port
 }
 
 func main() {
@@ -81,6 +108,27 @@ func buildAuthFlags() []cli.Flag {
 			Value:   false,
 			Usage:   "Enable Verbose Output",
 		},
+	}
+}
+
+func buildIPv6Flag() cli.Flag {
+	return &cli.StringFlag{
+		Name:  "ipv6-mode",
+		Usage: "IPv6 routing mode: 'on' (route IPv6 through VPN, default), 'off' (IPv4 only), 'kill' (route IPv6 + ip6tables killswitch)",
+		Value: "on",
+	}
+}
+
+func parseIPv6Mode(s string) (pia.IPv6Mode, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "on", "":
+		return pia.IPv6ModeOn, nil
+	case "off":
+		return pia.IPv6ModeOff, nil
+	case "kill":
+		return pia.IPv6ModeKill, nil
+	default:
+		return 0, fmt.Errorf("unknown --ipv6-mode %q: must be 'on', 'off', or 'kill'", s)
 	}
 }
 
@@ -161,6 +209,7 @@ func buildGenerateCommand() *cli.Command {
 		Aliases: []string{"gen"},
 		Usage:   "Generate a WireGuard config for PIA",
 		Flags: append(buildAuthFlags(),
+			buildIPv6Flag(),
 			&cli.StringFlag{
 				Name:    "outfile",
 				Aliases: []string{"o"},
@@ -176,7 +225,7 @@ func buildGenerateCommand() *cli.Command {
 				Name:    "server",
 				Aliases: []string{"s"},
 				Value:   false,
-				Usage:   "Include the servers common name metadata in the config",
+				Usage:   "Include the server's common name as a comment in the config",
 			},
 			&cli.BoolFlag{
 				Name:    "port-forwarding",
@@ -204,6 +253,11 @@ func runGenerate(c *cli.Context) error {
 		region = defaultRegion
 	}
 
+	ipv6Mode, err := parseIPv6Mode(c.String("ipv6-mode"))
+	if err != nil {
+		return err
+	}
+
 	if verbose {
 		log.Print("Creating PIA Client")
 	}
@@ -217,7 +271,7 @@ func runGenerate(c *cli.Context) error {
 	}
 	wgConfigGenerator := pia.NewPIAWgGenerator(
 		piaClient,
-		pia.PIAWgGeneratorConfig{Verbose: verbose, ServerName: serverName},
+		pia.PIAWgGeneratorConfig{Verbose: verbose, ServerName: serverName, IPv6Mode: ipv6Mode},
 	)
 
 	if verbose {
@@ -228,11 +282,9 @@ func runGenerate(c *cli.Context) error {
 		return err
 	}
 
-	config := gen.Config
-
 	outfile := strings.TrimSpace(c.String("outfile"))
 	if outfile != "" {
-		if err := atomicWriteFile(outfile, []byte(config), 0644); err != nil {
+		if err := atomicWriteFile(outfile, []byte(gen.Config), 0644); err != nil {
 			return err
 		}
 		if verbose {
@@ -241,7 +293,7 @@ func runGenerate(c *cli.Context) error {
 		return nil
 	}
 
-	_, err = io.WriteString(os.Stdout, config)
+	_, err = io.WriteString(os.Stdout, gen.Config)
 	return err
 }
 
@@ -333,13 +385,15 @@ type daemonStatus struct {
 	NextRefreshUTC    time.Time `json:"next_refresh_utc"`
 	PortForwarding    bool      `json:"port_forwarding"`
 	ServerNameEnabled bool      `json:"server_name_enabled"`
+	IPv6Mode          string    `json:"ipv6_mode"`
 }
 
 func buildDaemonCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "daemon",
-		Usage: "Run Continuously: Refresh WireGuard configs and maintain port forwarding",
+		Usage: "Run continuously: refresh WireGuard configs and maintain port forwarding",
 		Flags: append(buildAuthFlags(),
+			buildIPv6Flag(),
 			&cli.StringFlag{
 				Name:  "state-dir",
 				Usage: "Directory to write state files (config, status, forwarded port)",
@@ -355,7 +409,7 @@ func buildDaemonCommand() *cli.Command {
 				Name:    "server",
 				Aliases: []string{"s"},
 				Value:   false,
-				Usage:   "Include server common name metadata in the config",
+				Usage:   "Include server common name as a comment in the config",
 			},
 			&cli.BoolFlag{
 				Name:    "port-forwarding",
@@ -375,7 +429,7 @@ func buildDaemonCommand() *cli.Command {
 			},
 			&cli.StringFlag{
 				Name:  "on-port-change",
-				Usage: "Hook command to run when forwarded port changes. Use {port} placeholder.",
+				Usage: "Hook command to run when the forwarded port changes. Use {port} placeholder.",
 				Value: "",
 			},
 		),
@@ -400,6 +454,11 @@ func runDaemon(c *cli.Context) error {
 		region = defaultRegion
 	}
 
+	ipv6Mode, err := parseIPv6Mode(c.String("ipv6-mode"))
+	if err != nil {
+		return err
+	}
+
 	configPath := mustStatePath(stateDir, defaultConfigFileName)
 	statusPath := mustStatePath(stateDir, defaultStatusFileName)
 	forwardedPortPath := mustStatePath(stateDir, defaultForwardedPortOut)
@@ -408,10 +467,12 @@ func runDaemon(c *cli.Context) error {
 	jitterMax := c.Duration("refresh-jitter")
 
 	if verbose {
-		log.Printf("Daemon Starting. region=%s stateDir=%s interval=%s", region, stateDir, interval)
+		log.Printf("Daemon Starting. region=%s stateDir=%s interval=%s ipv6Mode=%s",
+			region, stateDir, interval, c.String("ipv6-mode"))
 	}
 
-	// PF lease state + renew loop
+	// Shared port-forwarding lease state — written by this goroutine,
+	// read by the renew goroutine via snapshot(). Mutex protected.
 	lease := &pfLeaseState{}
 	startPFRenewLoop(lease, verbose)
 
@@ -426,6 +487,7 @@ func runDaemon(c *cli.Context) error {
 			NextRefreshUTC:    next,
 			PortForwarding:    portForwarding,
 			ServerNameEnabled: serverName,
+			IPv6Mode:          c.String("ipv6-mode"),
 		}
 
 		piaClient, clientErr := pia.NewPIAClient(username, password, region, verbose, portForwarding)
@@ -438,7 +500,7 @@ func runDaemon(c *cli.Context) error {
 
 		wgConfigGenerator := pia.NewPIAWgGenerator(
 			piaClient,
-			pia.PIAWgGeneratorConfig{Verbose: verbose, ServerName: serverName},
+			pia.PIAWgGeneratorConfig{Verbose: verbose, ServerName: serverName, IPv6Mode: ipv6Mode},
 		)
 
 		gen, genErr := wgConfigGenerator.GenerateWithMetadata()
@@ -456,11 +518,11 @@ func runDaemon(c *cli.Context) error {
 			continue
 		}
 
-		// Port forwarding: acquire lease + write forwarded_port + update renew state.
 		if portForwarding {
-			portStr, pfErr := acquireAndBindPort(piaClient, gen.Key, verbose)
+			portStr, sig, gw, pfErr := acquireAndBindPort(piaClient, gen.Key, verbose)
 			if pfErr != nil {
 				status.LastError = pfErr.Error()
+				lease.disable()
 				_ = writeStatus(statusPath, status)
 				sleepUntil(next, verbose)
 				continue
@@ -480,9 +542,10 @@ func runDaemon(c *cli.Context) error {
 				_ = runHook(hookCmd, portStr, verbose)
 			}
 
-			// Update renew loop state.
-			// If gateway/signature changes (e.g. new server), renew loop follows the new values.
-			updateLeaseState(lease, piaClient, gen.Key, portStr, verbose)
+			// Store the gateway + signature for the renew loop.
+			// The same signature is reused for every BindPort renewal — do NOT
+			// call GetSignature again until the next full config refresh.
+			lease.set(gw, sig, portStr)
 		}
 
 		_ = writeStatus(statusPath, status)
@@ -495,82 +558,54 @@ func runDaemon(c *cli.Context) error {
 	}
 }
 
-func acquireAndBindPort(piaClient *pia.PIAClient, keyMeta pia.AddKeyResult, verbose bool) (string, error) {
-	// Determine Gateway
-	gateway := strings.TrimSpace(keyMeta.Gateway)
+// acquireAndBindPort authenticates, obtains a port-forwarding signature from
+// the gateway, performs the initial bind, and returns the port string, the
+// reusable signature, and the normalised gateway address.
+// Only ONE GetToken and ONE GetSignature call is made per config refresh.
+func acquireAndBindPort(piaClient *pia.PIAClient, keyMeta pia.AddKeyResult, verbose bool) (portStr string, sig pia.PFSignatureResponse, gateway string, err error) {
+	gateway = strings.TrimSpace(keyMeta.Gateway)
 	if gateway == "" {
 		gateway = strings.TrimSpace(keyMeta.ServerVip)
 	}
 	if gateway == "" {
-		return "", errors.New("port forwarding enabled but no gateway/server_vip returned by API")
+		return "", pia.PFSignatureResponse{}, "", errors.New("port forwarding enabled but no gateway/server_vip returned by API")
 	}
 
 	token, err := piaClient.GetToken()
 	if err != nil {
-		return "", err
+		return "", pia.PFSignatureResponse{}, "", err
 	}
 
 	pfClient := pia.NewPFClient(verbose)
 
 	sig, payload, err := pfClient.GetSignature(gateway, token)
 	if err != nil {
-		return "", err
+		return "", pia.PFSignatureResponse{}, "", err
 	}
 
 	if err := pfClient.BindPort(gateway, sig); err != nil {
-		return "", err
+		return "", pia.PFSignatureResponse{}, "", err
 	}
 
-	return strconv.Itoa(payload.Port), nil
+	return strconv.Itoa(payload.Port), sig, gateway, nil
 }
 
-func updateLeaseState(lease *pfLeaseState, piaClient *pia.PIAClient, keyMeta pia.AddKeyResult, portStr string, verbose bool) {
-	gateway := strings.TrimSpace(keyMeta.Gateway)
-	if gateway == "" {
-		gateway = strings.TrimSpace(keyMeta.ServerVip)
-	}
-	if gateway == "" {
-		lease.Enabled = false
-		return
-	}
-
-	token, err := piaClient.GetToken()
-	if err != nil {
-		if verbose {
-			log.Printf("PF Lease Update Token Error: %v", err)
-		}
-		lease.Enabled = false
-		return
-	}
-
-	pfClient := pia.NewPFClient(verbose)
-	sig, _, err := pfClient.GetSignature(gateway, token)
-	if err != nil {
-		if verbose {
-			log.Printf("PF Lease Update Signature Error: %v", err)
-		}
-		lease.Enabled = false
-		return
-	}
-
-	lease.Enabled = true
-	lease.Gateway = gateway
-	lease.Signature = sig
-	lease.Port = portStr
-}
-
+// startPFRenewLoop starts a background goroutine that calls BindPort every
+// defaultPFRenewInterval using whatever lease state is currently active.
+// It must be started once; the main loop updates the lease via lease.set().
 func startPFRenewLoop(lease *pfLeaseState, verbose bool) {
 	go func() {
 		ticker := time.NewTicker(defaultPFRenewInterval)
 		defer ticker.Stop()
 
 		for range ticker.C {
-			if !lease.Enabled {
+			enabled, gateway, sig, port := lease.snapshot()
+			if !enabled {
 				continue
 			}
 
 			pfClient := pia.NewPFClient(verbose)
-			if err := pfClient.BindPort(lease.Gateway, lease.Signature); err != nil {
+			if err := pfClient.BindPort(gateway, sig); err != nil {
 				if verbose {
 					log.Printf("PF Renew Failed: %v", err)
 				}
@@ -578,7 +613,7 @@ func startPFRenewLoop(lease *pfLeaseState, verbose bool) {
 			}
 
 			if verbose {
-				log.Printf("PF Renewed (Port %s)", lease.Port)
+				log.Printf("PF Renewed (Port %s)", port)
 			}
 		}
 	}()

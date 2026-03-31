@@ -1,37 +1,58 @@
+//go:build integration
+
 package pia
+
+// Integration tests hit the real PIA API and are skipped automatically when
+// PIA_USERNAME / PIA_PASSWORD are not set. They are never run as part of the
+// standard `make test` target — use `make test-integration` instead.
+//
+// Environment variables:
+//   PIA_USERNAME  — PIA account username (required)
+//   PIA_PASSWORD  — PIA account password (required)
+//   PIA_REGION    — Region ID or name to use (default: uk_southampton)
+//   PIA_PF        — Set to "1" to also exercise the port-forwarding flow
+//
+// Design principles:
+//   - Each test makes the minimum number of API calls necessary.
+//   - Credentials and the server list are fetched once per test; tokens are
+//     not shared across tests to avoid expiry races.
+//   - No test polls or sleeps — PF bind is exercised but not the renew loop.
 
 import (
 	"os"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
-// Validate we can generate a config with metadata
-func TestIntegration_GenerateWithMetadata_Works(t *testing.T) {
+// credsOrSkip returns (username, password) or skips the test if they are absent.
+func credsOrSkip(t *testing.T) (string, string) {
+	t.Helper()
 	username := strings.TrimSpace(os.Getenv("PIA_USERNAME"))
 	password := strings.TrimSpace(os.Getenv("PIA_PASSWORD"))
 	if username == "" || password == "" {
-		t.Skip("Optional: Set PIA_USERNAME and PIA_PASSWORD To Run The Integration Tests")
+		t.Skip("Set PIA_USERNAME and PIA_PASSWORD to run integration tests")
 	}
+	return username, password
+}
 
-	region := strings.TrimSpace(os.Getenv("PIA_REGION"))
-	if region == "" {
-		region = "uk_southampton"
+func regionFromEnv() string {
+	if r := strings.TrimSpace(os.Getenv("PIA_REGION")); r != "" {
+		return r
 	}
+	return "uk_southampton"
+}
 
-	curlPath := strings.TrimSpace(os.Getenv("CURL_PATH"))
-	if curlPath == "" && runtime.GOOS == "windows" {
-		curlPath = "openssl_curl.exe"
-	}
-
-	// Optional PF Testing
+// TestIntegration_GenerateWithMetadata_Works is the primary smoke test.
+// It authenticates, registers a key, generates a full config, and validates
+// that every critical field is present and sane.
+func TestIntegration_GenerateWithMetadata_Works(t *testing.T) {
+	username, password := credsOrSkip(t)
 	pfEnabled := os.Getenv("PIA_PF") == "1"
 
-	client, err := NewPIAClient(username, password, curlPath, region, true, pfEnabled)
+	client, err := NewPIAClient(username, password, regionFromEnv(), true, pfEnabled)
 	if err != nil {
 		t.Fatalf("NewPIAClient: %v", err)
 	}
@@ -45,51 +66,56 @@ func TestIntegration_GenerateWithMetadata_Works(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateWithMetadata: %v", err)
 	}
-
 	if res.Config == "" {
-		t.Fatalf("Expected Config Got Empty String")
+		t.Fatalf("Expected Config, got empty string")
 	}
 
-	excerpt := excerptConfig(res.Config, 20)
 	t.Log("---- WireGuard Config (excerpt) ----")
-	t.Log("\n" + excerpt)
+	t.Log("\n" + excerptConfig(res.Config, 20))
 	t.Log("---- End Excerpt ----")
 
-	// Validate our config has the critical bitz.
+	// Required keys.
+	assertConfigContains(t, res.Config, "[Interface]")
 	assertConfigContains(t, res.Config, "PrivateKey = ")
 	assertConfigContains(t, res.Config, "Address = ")
 	assertConfigContains(t, res.Config, "DNS = ")
 	assertConfigContains(t, res.Config, "[Peer]")
 	assertConfigContains(t, res.Config, "PublicKey = ")
+	// Default mode is IPv6ModeOn — dual-stack AllowedIPs.
 	assertConfigContains(t, res.Config, "AllowedIPs = 0.0.0.0/0, ::/0")
 	assertConfigContains(t, res.Config, "Endpoint = ")
 
-	// Validate the endpoint metadata looks real.
+	// ServerCommonName must be a comment, not a bare key.
+	if strings.Contains(res.Config, "\nServerCommonName =") {
+		t.Fatalf("ServerCommonName must not appear as a bare WireGuard key:\n%s", res.Config)
+	}
+
+	// Metadata sanity.
 	if strings.TrimSpace(res.Key.ServerIP) == "" {
-		t.Fatalf("Expected Server IP From API Got Empty Key: %+v", res.Key)
+		t.Fatalf("Expected ServerIP from API, got empty. Key: %+v", res.Key)
 	}
 	if res.Key.ServerPort <= 0 || res.Key.ServerPort > 65535 {
-		t.Fatalf("Invalid Server Port From API: %d. Key: %+v", res.Key.ServerPort, res.Key)
+		t.Fatalf("Invalid ServerPort: %d. Key: %+v", res.Key.ServerPort, res.Key)
 	}
 
-	// Confirm the config endpoint matches the metadata exactly.
-	if !strings.Contains(res.Config, "Endpoint = "+res.Key.ServerIP+":"+strconv.Itoa(res.Key.ServerPort)) {
-		t.Fatalf("Config Endpoint Does Not Match API Metadata. Endpoint=%s:%d\nConfig:\n%s",
-			res.Key.ServerIP, res.Key.ServerPort, res.Config)
+	// Config endpoint must match the API metadata exactly.
+	wantEndpoint := "Endpoint = " + res.Key.ServerIP + ":" + strconv.Itoa(res.Key.ServerPort)
+	if !strings.Contains(res.Config, wantEndpoint) {
+		t.Fatalf("Config endpoint does not match API metadata.\nWant: %s\nConfig:\n%s",
+			wantEndpoint, res.Config)
 	}
 
-	// Optional: PF flow validation (real gateway, rolling port).
 	if !pfEnabled {
 		return
 	}
 
-	// The gateway can be in different fields depending on the API.
+	// --- Optional: Port-forwarding flow ---
 	gw := strings.TrimSpace(res.Key.Gateway)
 	if gw == "" {
 		gw = strings.TrimSpace(res.Key.ServerVip)
 	}
 	if gw == "" {
-		t.Skip("PF Is Enabled But The API Did Not Return Gateway/ServerVip; Cannot Validate PF Bind")
+		t.Skip("PF enabled but API returned no gateway/server_vip; cannot validate PF bind")
 	}
 
 	token, err := client.GetToken()
@@ -103,229 +129,160 @@ func TestIntegration_GenerateWithMetadata_Works(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSignature: %v", err)
 	}
-
 	if payload.Port <= 0 || payload.Port > 65535 {
-		t.Fatalf("Invalid Forwarded Port Returned: %d (payload=%+v)", payload.Port, payload)
+		t.Fatalf("Invalid forwarded port: %d (payload=%+v)", payload.Port, payload)
 	}
 	if payload.ExpiresAt.IsZero() {
-		// Some implementations may omit, but if it exists we want it sane.
-		// Not fatal if PIA returns zero, but worth a warning.
 		t.Logf("Warning: payload.ExpiresAt is zero (payload=%+v)", payload)
 	}
 
 	if err := pf.BindPort(gw, sig); err != nil {
 		t.Fatalf("BindPort: %v", err)
 	}
+
+	t.Logf("Port forwarding OK — port %d (expires %s)", payload.Port, payload.ExpiresAt.Format(time.RFC3339))
 }
 
-// Validate we can fetch and parse the regions
+// TestIntegration_GetAvailableRegions_Works validates the server list endpoint.
+// It reuses the already-cached server list (no second network call).
 func TestIntegration_GetAvailableRegions_Works(t *testing.T) {
-	username := strings.TrimSpace(os.Getenv("PIA_USERNAME"))
-	password := strings.TrimSpace(os.Getenv("PIA_PASSWORD"))
-	if username == "" || password == "" {
-		t.Skip("Optional: Set PIA_USERNAME and PIA_PASSWORD To Run The Integration Tests")
-	}
+	username, password := credsOrSkip(t)
 
-	// Init
-	client, err := NewPIAClient(username, password, "", "uk_southampton", false, false)
+	client, err := NewPIAClient(username, password, regionFromEnv(), false, false)
 	if err != nil {
 		t.Fatalf("NewPIAClient: %v", err)
 	}
 
-	// Fetch
 	regions, err := client.GetAvailableRegions()
 	if err != nil {
 		t.Fatalf("GetAvailableRegions: %v", err)
 	}
 	if len(regions) == 0 {
-		t.Fatalf("Expected Some Regions, Got None")
+		t.Fatalf("Expected at least one region, got none")
+	}
+	if strings.TrimSpace(regions[0].ID) == "" || strings.TrimSpace(regions[0].Name) == "" {
+		t.Fatalf("Expected region ID and Name to be set, got: %+v", regions[0])
 	}
 
-	// Spot check format.
-	if strings.TrimSpace(regions[0].ID) == "" || strings.TrimSpace(regions[0].Name) == "" {
-		t.Fatalf("Expected Region ID And Name Set, Got: %+v", regions[0])
-	}
+	t.Logf("Got %d regions; first: %s (%s)", len(regions), regions[0].ID, regions[0].Name)
 }
 
-// Validate the structure of a config we've generated
+// TestIntegration_ConfigShape_IsValid performs regex-level structural
+// validation of a generated config, independently of metadata field values.
 func TestIntegration_ConfigShape_IsValid(t *testing.T) {
-	username := strings.TrimSpace(os.Getenv("PIA_USERNAME"))
-	password := strings.TrimSpace(os.Getenv("PIA_PASSWORD"))
-	if username == "" || password == "" {
-		t.Skip("Optional: Set PIA_USERNAME and PIA_PASSWORD To Run The Integration Tests")
-	}
+	username, password := credsOrSkip(t)
 
-	curlPath := strings.TrimSpace(os.Getenv("CURL_PATH"))
-	if curlPath == "" && runtime.GOOS == "windows" {
-		curlPath = "openssl_curl.exe"
-	}
-
-	// Init
-	client, err := NewPIAClient(username, password, curlPath, "uk_southampton", false, false)
+	client, err := NewPIAClient(username, password, regionFromEnv(), false, false)
 	if err != nil {
 		t.Fatalf("NewPIAClient: %v", err)
 	}
 
-	// Generate
-	gen := NewPIAWgGenerator(client, PIAWgGeneratorConfig{})
-	res, err := gen.GenerateWithMetadata()
+	res, err := NewPIAWgGenerator(client, PIAWgGeneratorConfig{}).GenerateWithMetadata()
 	if err != nil {
 		t.Fatalf("GenerateWithMetadata: %v", err)
 	}
 
 	cfg := res.Config
-
-	// Output an excerpt of the config we generated
-	excerpt := excerptConfig(cfg, 20)
 	t.Log("---- WireGuard Config (excerpt) ----")
-	t.Log("\n" + excerpt)
+	t.Log("\n" + excerptConfig(cfg, 20))
 	t.Log("---- End Excerpt ----")
 
-	// Ensure the keys exist and are non-empty(ish).
 	mustMatch(t, cfg, `(?m)^\[Interface\]\s*$`)
 	mustMatch(t, cfg, `(?m)^PrivateKey = .+$`)
 	mustMatch(t, cfg, `(?m)^Address = .+$`)
 	mustMatch(t, cfg, `(?m)^DNS = .+$`)
 	mustMatch(t, cfg, `(?m)^\[Peer\]\s*$`)
 	mustMatch(t, cfg, `(?m)^PublicKey = .+$`)
+	// Default IPv6ModeOn → dual-stack.
 	mustMatch(t, cfg, `(?m)^AllowedIPs = 0\.0\.0\.0/0, ::/0$`)
 	mustMatch(t, cfg, `(?m)^Endpoint = .+:\d+$`)
 	mustMatch(t, cfg, `(?m)^PersistentKeepalive = 25$`)
 
-	// Validate the endpoint port is numeric and in range.
+	// Endpoint port must be a valid port number.
 	re := regexp.MustCompile(`(?m)^Endpoint = .+:(\d+)$`)
 	m := re.FindStringSubmatch(cfg)
 	if len(m) != 2 {
-		t.Fatalf("Could Not Extract Endpoint Port From Config:\n%s", cfg)
+		t.Fatalf("Could not extract endpoint port from config:\n%s", cfg)
 	}
 	port, err := strconv.Atoi(m[1])
 	if err != nil || port <= 0 || port > 65535 {
-		t.Fatalf("Invalid Endpoint Port In Config: %q", m[1])
+		t.Fatalf("Invalid endpoint port in config: %q", m[1])
 	}
 
-	_ = time.Now() // keeps the import available if you extend checks
+	_ = time.Now() // keeps import alive for future assertions
 }
 
-// Validate IPv6 Off Mode Produces IPv4-Only AllowedIPs
+// TestIntegration_IPv6Mode_Off_Works validates that IPv6ModeOff produces an
+// IPv4-only config with no PostUp/PostDown rules.
 func TestIntegration_IPv6Mode_Off_Works(t *testing.T) {
-	username := strings.TrimSpace(os.Getenv("PIA_USERNAME"))
-	password := strings.TrimSpace(os.Getenv("PIA_PASSWORD"))
-	if username == "" || password == "" {
-		t.Skip("Optional: Set PIA_USERNAME and PIA_PASSWORD To Run The Integration Tests")
-	}
+	username, password := credsOrSkip(t)
 
-	region := strings.TrimSpace(os.Getenv("PIA_REGION"))
-	if region == "" {
-		region = "uk_southampton"
-	}
-
-	curlPath := strings.TrimSpace(os.Getenv("CURL_PATH"))
-	if curlPath == "" && runtime.GOOS == "windows" {
-		curlPath = "openssl_curl.exe"
-	}
-
-	// PF Off For This Test (We Are Only Validating The Template Output)
-	client, err := NewPIAClient(username, password, curlPath, region, false, false)
+	client, err := NewPIAClient(username, password, regionFromEnv(), false, false)
 	if err != nil {
 		t.Fatalf("NewPIAClient: %v", err)
 	}
 
-	gen := NewPIAWgGenerator(client, PIAWgGeneratorConfig{
-		Verbose:    false,
+	res, err := NewPIAWgGenerator(client, PIAWgGeneratorConfig{
 		ServerName: true,
 		IPv6Mode:   IPv6ModeOff,
-	})
-
-	res, err := gen.GenerateWithMetadata()
+	}).GenerateWithMetadata()
 	if err != nil {
 		t.Fatalf("GenerateWithMetadata: %v", err)
 	}
 
-	if res.Config == "" {
-		t.Fatalf("Expected Config Got Empty String")
-	}
-
-	excerpt := excerptConfig(res.Config, 22)
 	t.Log("---- WireGuard Config (excerpt) ----")
-	t.Log("\n" + excerpt)
+	t.Log("\n" + excerptConfig(res.Config, 22))
 	t.Log("---- End Excerpt ----")
 
-	// Ensure IPv6 Route Is NOT Present
 	assertConfigContains(t, res.Config, "AllowedIPs = 0.0.0.0/0")
 	if strings.Contains(res.Config, "::/0") {
-		t.Fatalf("Expected IPv6 To Be Disabled But Found ::/0 In Config:\n%s", res.Config)
+		t.Fatalf("IPv6ModeOff: must not contain ::/0:\n%s", res.Config)
 	}
-
-	// Ensure No PostUp/PostDown Are Injected In Off Mode
 	if regexp.MustCompile(`(?m)^PostUp =`).MatchString(res.Config) {
-		t.Fatalf("Did Not Expect PostUp In IPv6 Off Mode:\n%s", res.Config)
+		t.Fatalf("IPv6ModeOff: must not contain PostUp:\n%s", res.Config)
 	}
 	if regexp.MustCompile(`(?m)^PostDown =`).MatchString(res.Config) {
-		t.Fatalf("Did Not Expect PostDown In IPv6 Off Mode:\n%s", res.Config)
+		t.Fatalf("IPv6ModeOff: must not contain PostDown:\n%s", res.Config)
 	}
 }
 
-// Validate IPv6 Kill Mode Writes PostUp/PostDown Rules (wg-quick Style)
+// TestIntegration_IPv6Mode_Kill_WritesPostUpDown validates that IPv6ModeKill
+// produces dual-stack AllowedIPs and ip6tables killswitch PostUp/PostDown rules.
 func TestIntegration_IPv6Mode_Kill_WritesPostUpDown(t *testing.T) {
-	username := strings.TrimSpace(os.Getenv("PIA_USERNAME"))
-	password := strings.TrimSpace(os.Getenv("PIA_PASSWORD"))
-	if username == "" || password == "" {
-		t.Skip("Optional: Set PIA_USERNAME and PIA_PASSWORD To Run The Integration Tests")
-	}
+	username, password := credsOrSkip(t)
 
-	region := strings.TrimSpace(os.Getenv("PIA_REGION"))
-	if region == "" {
-		region = "uk_southampton"
-	}
-
-	curlPath := strings.TrimSpace(os.Getenv("CURL_PATH"))
-	if curlPath == "" && runtime.GOOS == "windows" {
-		curlPath = "openssl_curl.exe"
-	}
-
-	// PF should be off for this test (We're only validating the template output)
-	client, err := NewPIAClient(username, password, curlPath, region, false, false)
+	client, err := NewPIAClient(username, password, regionFromEnv(), false, false)
 	if err != nil {
 		t.Fatalf("NewPIAClient: %v", err)
 	}
 
-	gen := NewPIAWgGenerator(client, PIAWgGeneratorConfig{
-		Verbose:    false,
+	res, err := NewPIAWgGenerator(client, PIAWgGeneratorConfig{
 		ServerName: true,
 		IPv6Mode:   IPv6ModeKill,
-	})
-
-	res, err := gen.GenerateWithMetadata()
+	}).GenerateWithMetadata()
 	if err != nil {
 		t.Fatalf("GenerateWithMetadata: %v", err)
 	}
 
-	if res.Config == "" {
-		t.Fatalf("Expected Config Got Empty String")
-	}
-
-	excerpt := excerptConfig(res.Config, 28)
 	t.Log("---- WireGuard Config (excerpt) ----")
-	t.Log("\n" + excerpt)
+	t.Log("\n" + excerptConfig(res.Config, 28))
 	t.Log("---- End Excerpt ----")
 
-	// In Kill Mode We Keep ::/0 (Then Block IPv6 Egress As A Killswitch)
 	assertConfigContains(t, res.Config, "AllowedIPs = 0.0.0.0/0, ::/0")
-
-	// Must Include PostUp/PostDown Lines
 	mustMatch(t, res.Config, `(?m)^PostUp = .+$`)
 	mustMatch(t, res.Config, `(?m)^PostDown = .+$`)
 
-	// Light Sanity Check That Rules Are Actually IPv6-Focused
 	if !strings.Contains(res.Config, "ip6tables") {
-		t.Fatalf("Expected ip6tables Rules In Kill Mode But None Were Found:\n%s", res.Config)
+		t.Fatalf("IPv6ModeKill: expected ip6tables in PostUp/PostDown:\n%s", res.Config)
 	}
 }
+
+// ---------- Helpers ----------
 
 func assertConfigContains(t *testing.T, cfg string, needle string) {
 	t.Helper()
 	if !strings.Contains(cfg, needle) {
-		t.Fatalf("Expected Config To Contain %q\nConfig:\n%s", needle, cfg)
+		t.Fatalf("Expected config to contain %q\nConfig:\n%s", needle, cfg)
 	}
 }
 
@@ -333,7 +290,7 @@ func mustMatch(t *testing.T, cfg string, pattern string) {
 	t.Helper()
 	re := regexp.MustCompile(pattern)
 	if !re.MatchString(cfg) {
-		t.Fatalf("Expected Config To Match %q\nConfig:\n%s", pattern, cfg)
+		t.Fatalf("Expected config to match %q\nConfig:\n%s", pattern, cfg)
 	}
 }
 
