@@ -1,0 +1,222 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "master"]
+  pull_request:
+    branches: ["main", "master"]
+
+# Cancel in-flight runs for the same ref so stale runs don't consume quota.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Unit tests — runs on all three platforms
+  # ─────────────────────────────────────────────────────────────────────────
+  unit:
+    name: Unit tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Unit tests
+        run: go test -mod=vendor ./...
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Race detector — Linux only (requires CGO / gcc)
+  # ─────────────────────────────────────────────────────────────────────────
+  race:
+    name: Race detector
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Unit tests (race)
+        run: go test -race -mod=vendor ./...
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Build check — verify the binary compiles on all platforms
+  # ─────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Build binary
+        run: go build -mod=vendor -o pia-wg-config${{ matrix.os == 'windows-latest' && '.exe' || '' }} .
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: pia-wg-config-${{ matrix.os }}
+          path: pia-wg-config${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Integration tests — real PIA API; secrets-gated, Linux only
+  # ─────────────────────────────────────────────────────────────────────────
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    # Only run when secrets are available (skipped on forks / unsigned PRs)
+    if: >
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+    env:
+      PIA_USERNAME: ${{ secrets.PIA_USERNAME }}
+      PIA_PASSWORD: ${{ secrets.PIA_PASSWORD }}
+      PIA_REGION:   ${{ secrets.PIA_REGION || 'uk_southampton' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Integration tests
+        # go test skips gracefully if PIA_USERNAME/PIA_PASSWORD are unset
+        run: go test -mod=vendor -tags=integration -v ./pia/...
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # System tests — Docker required; Linux + secrets
+  # ─────────────────────────────────────────────────────────────────────────
+  system-gluetun:
+    name: System test — Gluetun
+    runs-on: ubuntu-latest
+    needs: [unit, build]
+    if: >
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Run Gluetun system test
+        env:
+          PIA_USERNAME: ${{ secrets.PIA_USERNAME }}
+          PIA_PASSWORD: ${{ secrets.PIA_PASSWORD }}
+          PIA_REGION:   ${{ secrets.PIA_REGION || 'ca_toronto' }}
+          PIA_PF:       "0"
+          IPV6_MODE:    "auto"
+          TZ:           "UTC"
+          STATE_DIR:    "/state"
+          WG_CONF_NAME: "wg0.conf"
+          PF_PORT_FILE: "forwarded_port"
+          IP_CHECK_URL: "https://api.ipify.org"
+          VPN_SERVICE_PROVIDER: "custom"
+          VPN_TYPE:     "wireguard"
+          GLUETUN_WG_CONF: "/gluetun/wireguard/wg0.conf"
+          CURL_PATH:    ""
+        run: |
+          cd system-tests/gluetun
+          docker compose up --build --abort-on-container-exit --exit-code-from tester
+          docker compose down --volumes
+
+  system-gluetun-pf:
+    name: System test — Gluetun + Port Forwarding
+    runs-on: ubuntu-latest
+    needs: [unit, build]
+    if: >
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Run Gluetun + PF system test
+        env:
+          PIA_USERNAME: ${{ secrets.PIA_USERNAME }}
+          PIA_PASSWORD: ${{ secrets.PIA_PASSWORD }}
+          PIA_REGION:   ${{ secrets.PIA_PF_REGION || 'ca_toronto' }}
+          PIA_PF:       "1"
+          IPV6_MODE:    "auto"
+          TZ:           "UTC"
+          STATE_DIR:    "/state"
+          WG_CONF_NAME: "wg0.conf"
+          PF_PORT_FILE: "forwarded_port"
+          IP_CHECK_URL: "https://api.ipify.org"
+          VPN_SERVICE_PROVIDER: "custom"
+          VPN_TYPE:     "wireguard"
+          GLUETUN_WG_CONF: "/gluetun/wireguard/wg0.conf"
+          CURL_PATH:    ""
+        run: |
+          cd system-tests/gluetun
+          docker compose up --build --abort-on-container-exit --exit-code-from tester
+          docker compose down --volumes
+
+  system-wg-client:
+    name: System test — WireGuard client
+    runs-on: ubuntu-latest
+    needs: [unit, build]
+    if: >
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable WireGuard kernel module
+        run: sudo modprobe wireguard
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Run WireGuard client system test
+        env:
+          PIA_USERNAME: ${{ secrets.PIA_USERNAME }}
+          PIA_PASSWORD: ${{ secrets.PIA_PASSWORD }}
+          PIA_REGION:   ${{ secrets.PIA_REGION || 'ca_toronto' }}
+          PIA_PF:       "0"
+          IPV6_MODE:    "auto"
+          TZ:           "UTC"
+          STATE_DIR:    "/state"
+          WG_CONF_NAME: "wg0.conf"
+          PF_PORT_FILE: "forwarded_port"
+          IP_CHECK_URL: "https://api.ipify.org"
+          VPN_SERVICE_PROVIDER: "custom"
+          VPN_TYPE:     "wireguard"
+          GLUETUN_WG_CONF: "/gluetun/wireguard/wg0.conf"
+          CURL_PATH:    ""
+        run: |
+          cd system-tests/wireguard-client
+          docker compose up --build --abort-on-container-exit --exit-code-from tester
+          docker compose down --volumes
