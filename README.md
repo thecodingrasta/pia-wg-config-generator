@@ -41,8 +41,8 @@ In short, it turns PIA WireGuard into something much closer to a **start-it-and-
 - One-shot WireGuard config generation to file or stdout
 - Daemon mode with automatic config/session refresh
 - Rolling PIA port-forwarding lease renewal
-- Hook support when the forwarded port changes
-- Region selection by ID or friendly name
+- Hook support after config refresh and when the forwarded port changes
+- Region selection by ID, friendly name, or server common name
 - Optional filtering to port-forwarding capable regions
 - IPv6 modes: dual-stack, IPv4-only, or dual-stack with an ip6tables killswitch
 - Token caching to avoid unnecessary authentication calls
@@ -104,7 +104,7 @@ Common options:
 |------|-----|-------------|
 | `--username`, `-u` | `PIA_USERNAME` | PIA account username |
 | `--password`, `-w` | `PIA_PASSWORD` | PIA account password |
-| `--region`, `-r` | | Region ID or friendly name |
+| `--region`, `-r` | | Region ID, friendly name, or server common name |
 | `--outfile`, `-o` | | File to write the config to. Defaults to stdout |
 | `--port-forwarding`, `-p` | | Restrict to port-forwarding capable servers |
 | `--ipv6-mode` | | `on`, `off`, or `kill` |
@@ -144,12 +144,13 @@ Common options:
 |------|-----|---------|-------------|
 | `--username`, `-u` | `PIA_USERNAME` | | PIA account username |
 | `--password`, `-w` | `PIA_PASSWORD` | | PIA account password |
-| `--region`, `-r` | | `amsterdam404` | Region ID or friendly name |
+| `--region`, `-r` | | `amsterdam404` | Region ID, friendly name, or server common name |
 | `--state-dir` | | `/state` | Directory for generated state files |
 | `--refresh-interval` | | `12h` | How often to regenerate the config |
 | `--refresh-jitter` | | `30m` | Random jitter added to refresh timing |
 | `--port-forwarding`, `-p` | | `false` | Acquire and renew a port-forwarding lease |
-| `--on-port-change` | | | Shell command run when the port changes |
+| `--on-config-change` | | | Shell command run after each successful config refresh |
+| `--on-port-change` | | | Shell command run only when the forwarded port changes |
 | `--ipv6-mode` | | `on` | `on`, `off`, or `kill` |
 | `--server`, `-s` | | `false` | Embed server identity as a comment |
 | `--verbose`, `-v` | | `false` | Enable verbose logging |
@@ -183,28 +184,55 @@ PostDown = ip6tables -D OUTPUT ! -o %i -j REJECT
 
 ## Docker / Gluetun
 
-A common setup is to run this as a sidecar alongside Gluetun.
+This is the recommended long-running setup.
 
-The daemon writes `wg0.conf` and port-forwarding state to a shared Docker volume, while Gluetun consumes the generated WireGuard config.
+The important pieces are:
+
+1. The daemon writes `wg0.conf` to `/gluetun/wireguard/wg0.conf`.
+2. Gluetun waits until that file exists before starting.
+3. The daemon restarts Gluetun after every successful config refresh.
+4. If port forwarding is enabled, the daemon writes the active port to `/gluetun/wireguard/forwarded_port`.
+
+Build the image once:
+
+```bash
+docker build -t pia-wg-config-generator:local .
+```
+
+Then use it in Compose:
 
 ```yaml
 services:
   pia-wg-daemon:
-    build: .
+    image: pia-wg-config-generator:local
+    container_name: pia-wg-daemon
     environment:
       PIA_USERNAME: ${PIA_USERNAME}
       PIA_PASSWORD: ${PIA_PASSWORD}
+      GLUETUN_CONTAINER: gluetun
     command: >
-      daemon --region ca_toronto
-             --port-forwarding
-             --state-dir /state
-             --refresh-interval 12h
-             --on-port-change "echo Port is {port}"
+      daemon
+        --region=${PIA_REGION}
+        --state-dir=/gluetun/wireguard
+        --port-forwarding
+        --refresh-interval=12h
+        --ipv6-mode=${IPV6_MODE}
+        --on-config-change="restart-gluetun"
+        --verbose
     volumes:
-      - state:/state
+      - ./config/gluetun:/gluetun
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /gluetun/wireguard/wg0.conf"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 5s
+    restart: unless-stopped
 
   gluetun:
     image: qmcgaw/gluetun:latest
+    container_name: gluetun
     cap_add:
       - NET_ADMIN
     devices:
@@ -212,17 +240,25 @@ services:
     environment:
       VPN_SERVICE_PROVIDER: custom
       VPN_TYPE: wireguard
-      WIREGUARD_CONF_FILE: /gluetun/wg0.conf
+      UPDATER_PERIOD: 0
     volumes:
-      - state:/gluetun:rw
+      - ./config/gluetun:/gluetun
     depends_on:
-      - pia-wg-daemon
-
-volumes:
-  state:
+      pia-wg-daemon:
+        condition: service_healthy
+    restart: unless-stopped
 ```
 
-See [`docs/gluetun.md`](docs/gluetun.md) for a fuller setup guide.
+Example `.env`:
+
+```ini
+PIA_USERNAME=your_pia_username
+PIA_PASSWORD=your_pia_password
+PIA_REGION=ca_toronto
+IPV6_MODE=kill
+```
+
+See [`docs/gluetun.md`](docs/gluetun.md) for the fuller setup guide and troubleshooting notes.
 
 ---
 
@@ -322,6 +358,7 @@ Port-forwarding flow:
 4. Renew the lease periodically.
 5. Write the active port to `forwarded_port`.
 6. Run `--on-port-change` if the port changes.
+7. Run `--on-config-change` after a successful config refresh.
 
 ---
 

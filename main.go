@@ -248,6 +248,37 @@ func runHook(command string, port string, verbose bool) error {
 	return cmd.Run()
 }
 
+func runConfigHook(command string, stateDir string, configPath string, forwardedPortPath string, port string, verbose bool) error {
+	if strings.TrimSpace(command) == "" {
+		return nil
+	}
+
+	expanded := expandConfigHookCommand(command, stateDir, configPath, forwardedPortPath, port)
+	if verbose {
+		log.Printf("Running Config Hook: %s", expanded)
+	}
+
+	cmd := exec.Command("sh", "-c", expanded)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func expandConfigHookCommand(command string, stateDir string, configPath string, forwardedPortPath string, port string) string {
+	replacements := map[string]string{
+		"{state_dir}":      stateDir,
+		"{config}":         configPath,
+		"{forwarded_port}": forwardedPortPath,
+		"{port}":           port,
+	}
+
+	expanded := command
+	for old, new := range replacements {
+		expanded = strings.ReplaceAll(expanded, old, new)
+	}
+	return expanded
+}
+
 // ---------- generate ----------
 
 func buildGenerateCommand() *cli.Command {
@@ -455,6 +486,11 @@ func buildDaemonCommand() *cli.Command {
 				Usage: "Hook command to run when the forwarded port changes. Use {port} placeholder.",
 				Value: "",
 			},
+			&cli.StringFlag{
+				Name:  "on-config-change",
+				Usage: "Hook command to run after each successful config refresh. Placeholders: {config}, {state_dir}, {forwarded_port}, {port}.",
+				Value: "",
+			},
 		),
 		Action: runDaemon,
 	}
@@ -471,7 +507,8 @@ func runDaemon(c *cli.Context) error {
 	portForwarding := c.Bool("port-forwarding")
 	region := strings.TrimSpace(c.String("region"))
 	stateDir := strings.TrimSpace(c.String("state-dir"))
-	hookCmd := c.String("on-port-change")
+	portHookCmd := c.String("on-port-change")
+	configHookCmd := c.String("on-config-change")
 
 	if region == "" {
 		region = defaultRegion
@@ -541,6 +578,7 @@ func runDaemon(c *cli.Context) error {
 			continue
 		}
 
+		var currentPort string
 		if portForwarding {
 			portStr, sig, gw, pfErr := acquireAndBindPort(piaClient, gen.Key, verbose)
 			if pfErr != nil {
@@ -551,6 +589,7 @@ func runDaemon(c *cli.Context) error {
 				continue
 			}
 
+			currentPort = portStr
 			status.LastForwardPort = portStr
 
 			if err := atomicWriteFile(forwardedPortPath, []byte(portStr), 0644); err != nil {
@@ -562,7 +601,7 @@ func runDaemon(c *cli.Context) error {
 
 			if portStr != lastPort {
 				lastPort = portStr
-				_ = runHook(hookCmd, portStr, verbose)
+				_ = runHook(portHookCmd, portStr, verbose)
 			}
 
 			// Store the gateway + signature for the renew loop.
@@ -572,6 +611,13 @@ func runDaemon(c *cli.Context) error {
 		}
 
 		_ = writeStatus(statusPath, status)
+		if err := runConfigHook(configHookCmd, stateDir, configPath, forwardedPortPath, currentPort, verbose); err != nil {
+			status.LastError = err.Error()
+			_ = writeStatus(statusPath, status)
+			if verbose {
+				log.Printf("Config Hook Failed: %v", err)
+			}
+		}
 
 		if verbose {
 			log.Printf("Updated: %s (pf=%t)", configPath, portForwarding)

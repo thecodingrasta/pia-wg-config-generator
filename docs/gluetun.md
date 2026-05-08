@@ -1,303 +1,252 @@
-# Docker + Gluetun Setup Guide
+# Docker + Gluetun Setup
 
-This guide walks through running `pia-wg-daemon` as a sidecar alongside [Gluetun](https://github.com/qdm12/gluetun) in Docker Compose.
+This guide shows the recommended setup: run `pia-wg-config` as a sidecar daemon, let it generate and refresh the PIA WireGuard config, and let Gluetun consume that generated config.
 
-The daemon generates and periodically refreshes a `wg0.conf` in a shared volume; Gluetun reads it to establish the WireGuard tunnel. Any container that routes through Gluetun's network namespace automatically benefits from the managed VPN session.
+The simple version:
 
----
+1. Build the daemon image once.
+2. Run the daemon and Gluetun against the same `./config/gluetun` directory.
+3. Make Gluetun wait until `wg0.conf` exists.
+4. Restart Gluetun after every successful config refresh.
 
-## Prerequisites
+## 1. Build the Image
 
-- Docker and Docker Compose v2
-- A Private Internet Access account
-
----
-
-## 1. Project Layout
-
-```
-your-stack/
-├── docker-compose.yml
-├── .env                   # your credentials (never commit this)
-└── ...
-```
-
----
-
-## 2. Environment File
-
-Copy the example and fill in your credentials:
+From this repository:
 
 ```bash
-cp system-tests/gluetun/.env.example .env
+docker build -t pia-wg-config-generator:local .
 ```
 
+If you run Docker on another machine, build the image on that machine or push it to a registry.
+
+## 2. Create `.env`
+
 ```ini
-# .env
 PIA_USERNAME=your_pia_username
 PIA_PASSWORD=your_pia_password
 
-# Region — run `pia-wg-config regions` to list available IDs
+# Use a region that supports port forwarding if --port-forwarding is enabled.
+# Run: pia-wg-config regions --pf-only
 PIA_REGION=ca_toronto
 
-# Set to 1 to enable port forwarding (only works on PF-capable regions)
-PIA_PF=0
-
-# IPv6 mode: auto (dual-stack), off (IPv4 only), kill (dual-stack + killswitch)
-IPV6_MODE=auto
+# on = dual stack, off = IPv4 only, kill = dual stack with an IPv6 block rule
+IPV6_MODE=kill
 
 TZ=Europe/London
-STATE_DIR=/state
-WG_CONF_NAME=wg0.conf
-PF_PORT_FILE=forwarded_port
-IP_CHECK_URL=https://api.ipify.org
-
-# Optional: path to an OpenSSL-linked curl inside the daemon container.
-# Leave blank to use the container's system curl.
-CURL_PATH=
-
-# Gluetun custom provider settings (do not change these)
-VPN_SERVICE_PROVIDER=custom
-VPN_TYPE=wireguard
-GLUETUN_WG_CONF=/gluetun/wireguard/wg0.conf
 ```
 
-> **On regions and port forwarding:** not all PIA regions support port forwarding.
-> Run `pia-wg-config regions --pf-only` to list the ones that do.
-> `ca_toronto`, `ca_vancouver`, `netherlands`, and `sweden` are commonly available.
-
----
-
-## 3. Basic Docker Compose
+## 3. Compose File
 
 ```yaml
-# docker-compose.yml
 services:
-
-  # ── Sidecar daemon ───────────────────────────────────────────────────────
   pia-wg-daemon:
-    build:
-      context: .           # uses the Dockerfile in the project root
+    image: pia-wg-config-generator:local
+    container_name: pia-wg-daemon
     environment:
-      - PIA_USERNAME=${PIA_USERNAME}
-      - PIA_PASSWORD=${PIA_PASSWORD}
-      - CURL_PATH=${CURL_PATH}
-      - TZ=${TZ}
+      PIA_USERNAME: ${PIA_USERNAME}
+      PIA_PASSWORD: ${PIA_PASSWORD}
+      TZ: ${TZ}
+      GLUETUN_CONTAINER: gluetun
     command: >
       daemon
         --region=${PIA_REGION}
-        --state-dir=${STATE_DIR}
+        --state-dir=/gluetun/wireguard
+        --port-forwarding
         --refresh-interval=12h
         --refresh-jitter=30m
+        --ipv6-mode=${IPV6_MODE}
+        --on-config-change="restart-gluetun"
         --verbose
     volumes:
-      - state:${STATE_DIR}
+      - ./config/gluetun:/gluetun
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /gluetun/wireguard/wg0.conf"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 5s
     restart: unless-stopped
 
-  # ── Gluetun VPN gateway ──────────────────────────────────────────────────
   gluetun:
     image: qmcgaw/gluetun:latest
-    cap_add: [NET_ADMIN]
+    container_name: gluetun
+    cap_add:
+      - NET_ADMIN
     devices:
       - /dev/net/tun:/dev/net/tun
     environment:
-      - TZ=${TZ}
-      - VPN_SERVICE_PROVIDER=${VPN_SERVICE_PROVIDER}
-      - VPN_TYPE=${VPN_TYPE}
-      - WIREGUARD_CONF_FILE=${GLUETUN_WG_CONF}
-      - UPDATER_PERIOD=0
+      TZ: ${TZ}
+      VPN_SERVICE_PROVIDER: custom
+      VPN_TYPE: wireguard
+      UPDATER_PERIOD: 0
     volumes:
-      - state:${STATE_DIR}:ro    # daemon writes here
-      - state:/gluetun:rw        # Gluetun reads wg0.conf from /gluetun/wireguard/
+      - ./config/gluetun:/gluetun
     depends_on:
-      - pia-wg-daemon
+      pia-wg-daemon:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- ${IP_CHECK_URL} >/dev/null 2>&1 || exit 1"]
-      interval: 15s
-      timeout: 5s
-      retries: 40
-
-  # ── Your application (routes through Gluetun) ────────────────────────────
-  myapp:
-    image: your-image:latest
-    network_mode: "service:gluetun"   # <-- all traffic via VPN
-    depends_on:
-      gluetun:
-        condition: service_healthy
-
-volumes:
-  state:
+      test: ["CMD-SHELL", "wget -qO- https://api.ipify.org >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
 ```
 
-Start the stack:
+Start it:
 
 ```bash
 docker compose up -d
 docker compose logs -f pia-wg-daemon
+docker compose logs -f gluetun
 ```
 
----
+## What Gets Written
 
-## 4. Port Forwarding
+With `--state-dir=/gluetun/wireguard`, the daemon writes:
 
-Enable `--port-forwarding` to acquire and maintain a PIA port lease. The daemon writes the port to `forwarded_port` in the state directory and calls the `--on-port-change` hook whenever it changes.
+| File | Purpose |
+|------|---------|
+| `/gluetun/wireguard/wg0.conf` | WireGuard config consumed by Gluetun |
+| `/gluetun/wireguard/status.json` | Last daemon status and errors |
+| `/gluetun/wireguard/forwarded_port` | Current forwarded port, when port forwarding is enabled |
+
+On the host, these are under:
+
+```text
+./config/gluetun/wireguard/
+```
+
+## Why the Healthcheck Matters
+
+Plain `depends_on` only starts containers in order. It does not wait until the first container is ready.
+
+This healthcheck:
 
 ```yaml
-  pia-wg-daemon:
-    command: >
-      daemon
-        --region=ca_toronto
-        --state-dir=/state
-        --port-forwarding
-        --on-port-change="sh -c 'echo {port} > /state/forwarded_port && echo New port: {port}'"
-        --refresh-interval=12h
-        --verbose
+test: ["CMD-SHELL", "test -s /gluetun/wireguard/wg0.conf"]
 ```
 
-The `{port}` placeholder in `--on-port-change` is replaced with the actual port number at runtime.
+makes Compose wait until the daemon has written a non-empty WireGuard config before starting Gluetun.
 
-### Using the port in another container
+## Why `--on-config-change` Matters
 
-Mount the state volume read-only and read the file:
+PIA sessions are refreshed over time. A refreshed `wg0.conf` can change even when the forwarded port stays the same.
 
-```yaml
-  qbittorrent:
-    image: linuxserver/qbittorrent:latest
-    network_mode: "service:gluetun"
-    volumes:
-      - state:/state:ro
-    environment:
-      - DOCKER_MODS=linuxserver/mods:qbittorrent-port-update
-      - PORT_FILE=/state/forwarded_port
-```
-
-Or write a small hook script that calls your app's API when the port changes:
+Use:
 
 ```bash
-# /scripts/update-qbittorrent-port.sh
-#!/usr/bin/env sh
-curl -s -X POST "http://localhost:8080/api/v2/app/setPreferences" \
-  --data-urlencode "json={\"listen_port\":$1}"
+--on-config-change="restart-gluetun"
 ```
+
+That restarts Gluetun after each successful config refresh. The image includes:
+
+- `docker-cli`
+- `/usr/local/bin/restart-gluetun`
+
+For this to work, the daemon needs:
 
 ```yaml
-    command: >
-      daemon
-        --region=ca_toronto
-        --state-dir=/state
-        --port-forwarding
-        --on-port-change="/scripts/update-qbittorrent-port.sh {port}"
+environment:
+  GLUETUN_CONTAINER: gluetun
+volumes:
+  - /var/run/docker.sock:/var/run/docker.sock:ro
 ```
 
----
+If your Gluetun container has a different name, set `GLUETUN_CONTAINER` to that exact container name.
 
-## 5. IPv6 Modes
+## Port Forwarding
 
-Set `IPV6_MODE` in your `.env`:
+Keep `--port-forwarding` enabled only on PIA regions that support port forwarding.
 
-| Value | Behaviour |
-|-------|-----------|
-| `auto` (or `on`) | Full dual-stack — routes IPv4 and IPv6 through the tunnel |
-| `off` | IPv4 only — IPv6 traffic bypasses the tunnel |
-| `kill` | Dual-stack + ip6tables rule that hard-blocks any IPv6 leaving outside the tunnel |
-
-```yaml
-  pia-wg-daemon:
-    command: >
-      daemon
-        --ipv6-mode=${IPV6_MODE}
-        ...
-```
-
----
-
-## 6. Config Refresh and Gluetun Reload
-
-PIA sessions last up to ~24 hours. The daemon refreshes the config automatically (default: every 12 hours with up to 30 minutes of jitter). When it writes a new `wg0.conf`, Gluetun needs to be restarted to pick it up.
-
-The cleanest approach is to send Gluetun a restart signal via the `--on-port-change` hook or a separate watchdog:
-
-**Option A — restart via Docker socket (simple):**
-
-Add a [Watchtower](https://containrrr.dev/watchtower/)-style signal or use the Docker CLI from within the daemon container:
-
-```yaml
-  pia-wg-daemon:
-    volumes:
-      - state:/state
-      - /var/run/docker.sock:/var/run/docker.sock:ro   # allow restarting gluetun
-    command: >
-      daemon
-        --region=ca_toronto
-        --state-dir=/state
-        --on-port-change="docker restart gluetun"
-```
-
-**Option B — Gluetun file-watch (future):**
-
-Gluetun has a planned file-watch feature for `wg0.conf`. Check the [Gluetun changelog](https://github.com/qdm12/gluetun/releases) for availability.
-
-**Option C — short refresh interval:**
-
-Set a short interval so Gluetun's own restart cycle picks up changes quickly:
-
-```yaml
-    command: >
-      daemon --refresh-interval=1h --refresh-jitter=5m ...
-```
-
----
-
-## 7. Complete Port-Forwarding Example
-
-The system-test docker-compose is the reference implementation:
+To list compatible regions:
 
 ```bash
-cat system-tests/gluetun/docker-compose.yml
+pia-wg-config regions --username YOU --password SECRET --pf-only
 ```
 
-To run it locally:
+When port forwarding succeeds, the daemon writes:
+
+```text
+/gluetun/wireguard/forwarded_port
+```
+
+Use that file from qBittorrent, scripts, or another sidecar if you need to update an application with the current port.
+
+`--on-port-change` is separate from `--on-config-change`. Use it only when another application needs to be told that the port changed:
 
 ```bash
-cp system-tests/gluetun/.env.example system-tests/gluetun/.env
-# Edit .env with your credentials and PIA_PF=1
-docker compose -f system-tests/gluetun/docker-compose.yml \
-  --env-file system-tests/gluetun/.env \
-  up --build
+--on-port-change="/scripts/update-qbittorrent-port.sh {port}"
 ```
 
----
+## Using an Existing Stack Prefix
 
-## 8. Troubleshooting
+If your Gluetun container is named dynamically, for example `media-gluetun`, configure:
 
-**Daemon starts but Gluetun never becomes healthy**
+```yaml
+environment:
+  GLUETUN_CONTAINER: media-gluetun
+```
 
-Check that the `wg0.conf` has been written to the shared volume:
+or:
+
+```yaml
+environment:
+  GLUETUN_CONTAINER: ${STACK_PREFIX}-gluetun
+```
+
+## IPv6 Mode
+
+Recommended values:
+
+| Value | Behavior |
+|-------|----------|
+| `on` | Route IPv4 and IPv6 through the tunnel |
+| `off` | IPv4 only |
+| `kill` | Route IPv4 and IPv6, plus add an ip6tables rule to block IPv6 outside the tunnel |
+
+If you do not want to think about IPv6, start with:
+
+```ini
+IPV6_MODE=kill
+```
+
+## Troubleshooting
+
+Check generated files:
+
 ```bash
-docker compose exec gluetun cat /gluetun/wireguard/wg0.conf
+ls -la ./config/gluetun/wireguard
+cat ./config/gluetun/wireguard/status.json
 ```
-If empty, the daemon may still be generating it on first run. Watch its logs:
+
+Check daemon logs:
+
 ```bash
 docker compose logs -f pia-wg-daemon
 ```
 
-**Token errors on first run**
+Check Gluetun logs:
 
-PIA's token endpoint occasionally rate-limits. The daemon will fall back to the metadata server automatically. Set `--verbose` to see which path it took.
-
-**`AddKey` fails with connection refused**
-
-This usually means the selected region's WireGuard server is temporarily unavailable. Try a different `--region`.
-
-**Port forwarding returns `status: ERROR`**
-
-PIA only supports port forwarding on a subset of regions. Run:
 ```bash
-pia-wg-config regions --pf-only
+docker compose logs -f gluetun
 ```
-and switch to one of those regions.
 
-**IPv6 leaks through**
+If Gluetun does not restart after refresh, check:
 
-Use `--ipv6-mode kill` to add an ip6tables rule that hard-blocks any IPv6 not routed through the tunnel.
+1. `/var/run/docker.sock` is mounted into `pia-wg-daemon`.
+2. `GLUETUN_CONTAINER` matches the actual Gluetun container name.
+3. `restart-gluetun` is present in the daemon image.
+
+You can test the helper manually:
+
+```bash
+docker compose exec pia-wg-daemon restart-gluetun
+```
+
+If `forwarded_port` is missing, check:
+
+1. `--port-forwarding` is present.
+2. `PIA_REGION` supports port forwarding.
+3. `status.json` does not contain a port-forwarding error.

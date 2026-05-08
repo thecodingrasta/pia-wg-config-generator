@@ -59,3 +59,34 @@ func TestBuildApp_HelpIncludesExamples(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildDaemonCommand_HasConfigRefreshHook(t *testing.T) {
+	cmd := buildDaemonCommand()
+
+	found := false
+	for _, flag := range cmd.Flags {
+		if names := flag.Names(); len(names) > 0 && names[0] == "on-config-change" {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Fatalf("expected daemon command to expose --on-config-change")
+	}
+}
+
+func TestExpandConfigHookCommand_ReplacesAllPlaceholders(t *testing.T) {
+	got := expandConfigHookCommand(
+		"reload {config} {state_dir} {forwarded_port} {port}",
+		"/state",
+		"/state/wg0.conf",
+		"/state/forwarded_port",
+		"43210",
+	)
+	want := "reload /state/wg0.conf /state /state/forwarded_port 43210"
+
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}

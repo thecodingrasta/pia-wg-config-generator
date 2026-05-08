@@ -12,10 +12,16 @@ services:
     command: >
       'ARGS="daemon --verbose --state-dir=${STATE_DIR} --region=${PIA_REGION} --refresh-interval=30m --refresh-jitter=2m";
       if [ "${PIA_PF}" = "1" ]; then ARGS="$ARGS --port-forwarding"; fi;
-      if [ -n "${IPV6_MODE}" ]; then ARGS="$ARGS --ipv6=${IPV6_MODE}"; fi;
+      if [ -n "${IPV6_MODE}" ]; then ARGS="$ARGS --ipv6-mode=${IPV6_MODE}"; fi;
       exec pia-wg-config $ARGS'
     volumes:
-      - state:${STATE_DIR}
+      - state:/gluetun
+    healthcheck:
+      test: ["CMD-SHELL", "test -s ${STATE_DIR}/wg0.conf"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 5s
     restart: "no"
 
   gluetun:
@@ -24,15 +30,14 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     depends_on:
-      - pia-wg-daemon
+      pia-wg-daemon:
+        condition: service_healthy
     volumes:
-      - state:${STATE_DIR}:ro
       - state:/gluetun:rw
     environment:
       - TZ=${TZ}
       - VPN_SERVICE_PROVIDER=${VPN_SERVICE_PROVIDER}
       - VPN_TYPE=${VPN_TYPE}
-      - WIREGUARD_CONF_FILE=${GLUETUN_WG_CONF}
       - UPDATER_PERIOD=0
     restart: "no"
     healthcheck:
@@ -56,7 +61,7 @@ services:
       - IP_CHECK_URL=${IP_CHECK_URL}
       - PIA_PF=${PIA_PF}
     volumes:
-      - state:${STATE_DIR}:ro
+      - state:/gluetun:ro
     restart: "no"
 
 volumes:
