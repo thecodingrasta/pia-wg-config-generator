@@ -421,11 +421,25 @@ func (p *PIAClient) resolveRegionID(input string, list PIAServerList) (string, e
 	needle := strings.ToLower(trimmed)
 
 	for _, r := range list.Regions {
+		if p.portForwarding && !r.PortForward {
+			continue
+		}
 		if strings.ToLower(r.ID) == needle {
 			return r.ID, nil
 		}
 		if strings.ToLower(r.Name) == needle {
 			return r.ID, nil
+		}
+	}
+
+	for _, r := range list.Regions {
+		if p.portForwarding && !r.PortForward {
+			continue
+		}
+		for _, server := range append(r.Servers.Meta, r.Servers.Wg...) {
+			if strings.ToLower(server.Cn) == needle {
+				return r.ID, nil
+			}
 		}
 	}
 

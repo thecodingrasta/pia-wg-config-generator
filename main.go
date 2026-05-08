@@ -67,9 +67,19 @@ func (s *pfLeaseState) snapshot() (enabled bool, gateway string, sig pia.PFSigna
 }
 
 func main() {
+	app := buildApp()
+
+	if err := app.Run(os.Args); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func buildApp() *cli.App {
 	app := &cli.App{
-		Name:  defaultAppName,
-		Usage: "Generate and manage WireGuard configs for Private Internet Access (PIA)",
+		Name:      defaultAppName,
+		Usage:     "Generate and manage WireGuard configs for Private Internet Access (PIA)",
+		UsageText: buildUsageText(),
+		Flags:     buildGenerateFlags(),
 		Commands: []*cli.Command{
 			buildGenerateCommand(),
 			buildRegionsCommand(),
@@ -81,9 +91,17 @@ func main() {
 		},
 	}
 
-	if err := app.Run(os.Args); err != nil {
-		log.Fatal(err)
-	}
+	return app
+}
+
+func buildUsageText() string {
+	return `pia-wg-config [global options] command [command options]
+
+Examples:
+  pia-wg-config generate --username USER --password PASS --region nl_amsterdam -o wg0.conf
+  pia-wg-config gen --username USER --password PASS
+  pia-wg-config --username USER --password PASS
+  pia-wg-config regions --username USER --password PASS --pf-only`
 }
 
 // ---------- Shared Flags/Helpers ----------
@@ -117,6 +135,35 @@ func buildIPv6Flag() cli.Flag {
 		Usage: "IPv6 routing mode: 'on' (route IPv6 through VPN, default), 'off' (IPv4 only), 'kill' (route IPv6 + ip6tables killswitch)",
 		Value: "on",
 	}
+}
+
+func buildGenerateFlags() []cli.Flag {
+	return append(buildAuthFlags(),
+		buildIPv6Flag(),
+		&cli.StringFlag{
+			Name:    "outfile",
+			Aliases: []string{"o"},
+			Usage:   "File to write the WireGuard config to (prints to stdout if omitted)",
+		},
+		&cli.StringFlag{
+			Name:    "region",
+			Aliases: []string{"r"},
+			Value:   defaultRegion,
+			Usage:   "PIA region ID, friendly name, or server common name (e.g. nl_amsterdam, \"Netherlands\", or amsterdam404)",
+		},
+		&cli.BoolFlag{
+			Name:    "server",
+			Aliases: []string{"s"},
+			Value:   false,
+			Usage:   "Include the server's common name as a comment in the config",
+		},
+		&cli.BoolFlag{
+			Name:    "port-forwarding",
+			Aliases: []string{"p"},
+			Value:   false,
+			Usage:   "Only pick servers that support port forwarding",
+		},
+	)
 }
 
 func parseIPv6Mode(s string) (pia.IPv6Mode, error) {
@@ -205,36 +252,12 @@ func runHook(command string, port string, verbose bool) error {
 
 func buildGenerateCommand() *cli.Command {
 	return &cli.Command{
-		Name:    "generate",
-		Aliases: []string{"gen"},
-		Usage:   "Generate a WireGuard config for PIA",
-		Flags: append(buildAuthFlags(),
-			buildIPv6Flag(),
-			&cli.StringFlag{
-				Name:    "outfile",
-				Aliases: []string{"o"},
-				Usage:   "File to write the WireGuard config to (prints to stdout if omitted)",
-			},
-			&cli.StringFlag{
-				Name:    "region",
-				Aliases: []string{"r"},
-				Value:   defaultRegion,
-				Usage:   "PIA region ID or friendly name (e.g. uk_southampton or \"UK Southampton\")",
-			},
-			&cli.BoolFlag{
-				Name:    "server",
-				Aliases: []string{"s"},
-				Value:   false,
-				Usage:   "Include the server's common name as a comment in the config",
-			},
-			&cli.BoolFlag{
-				Name:    "port-forwarding",
-				Aliases: []string{"p"},
-				Value:   false,
-				Usage:   "Only pick servers that support port forwarding",
-			},
-		),
-		Action: runGenerate,
+		Name:      "generate",
+		Aliases:   []string{"gen"},
+		Usage:     "Generate a WireGuard config for PIA",
+		UsageText: "pia-wg-config generate --username USER --password PASS [options]",
+		Flags:     buildGenerateFlags(),
+		Action:    runGenerate,
 	}
 }
 

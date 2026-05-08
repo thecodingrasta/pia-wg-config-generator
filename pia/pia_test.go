@@ -38,6 +38,43 @@ func TestResolveRegionID_ByID_And_ByName(t *testing.T) {
 	}
 }
 
+func TestResolveRegionID_ByServerCommonName(t *testing.T) {
+	list := PIAServerList{
+		Regions: []struct {
+			ID          string `json:"id"`
+			Name        string `json:"name"`
+			Country     string `json:"country"`
+			AutoRegion  bool   `json:"auto_region"`
+			DNS         string `json:"dns"`
+			PortForward bool   `json:"port_forward"`
+			Geo         bool   `json:"geo"`
+			Servers     struct {
+				Meta []Server `json:"meta"`
+				Wg   []Server `json:"wg"`
+			} `json:"servers"`
+		}{
+			{
+				ID:          "nl_netherlands-so",
+				Name:        "NL Netherlands Streaming Optimized",
+				PortForward: true,
+				Servers: struct {
+					Meta []Server `json:"meta"`
+					Wg   []Server `json:"wg"`
+				}{
+					Meta: []Server{{Cn: "amsterdam405", IP: "154.47.21.141"}},
+					Wg:   []Server{{Cn: "amsterdam404", IP: "154.47.21.134"}},
+				},
+			},
+		},
+	}
+
+	c := &PIAClient{}
+	got, err := c.resolveRegionID("amsterdam404", list)
+	if err != nil || got != "nl_netherlands-so" {
+		t.Fatalf("expected nl_netherlands-so, got %q err=%v", got, err)
+	}
+}
+
 func TestResolveRegionID_Unknown(t *testing.T) {
 	list := PIAServerList{Regions: []struct {
 		ID          string `json:"id"`
