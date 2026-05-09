@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,8 @@ import (
 	"log"
 	"math/big"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +32,7 @@ const (
 	defaultDaemonRetryDelay = 5 * time.Minute
 	defaultGatewayTimeout   = 2 * time.Minute
 	defaultGatewayInterval  = 5 * time.Second
+	defaultDockerSocket     = "/var/run/docker.sock"
 	defaultStatusFileName   = "status.json"
 	defaultConfigFileName   = "wg0.conf"
 	defaultForwardedPortOut = "forwarded_port"
@@ -283,6 +287,79 @@ func expandConfigHookCommand(command string, stateDir string, configPath string,
 	return expanded
 }
 
+func runConfigChangeActions(command string, restartContainer string, dockerSocket string, stateDir string, configPath string, forwardedPortPath string, port string, verbose bool) error {
+	if err := runConfigHook(command, stateDir, configPath, forwardedPortPath, port, verbose); err != nil {
+		return err
+	}
+
+	if restartContainer == "" {
+		return nil
+	}
+
+	return restartDockerContainer(dockerSocket, restartContainer, verbose)
+}
+
+func restartDockerContainer(socketPath string, container string, verbose bool) error {
+	if strings.TrimSpace(socketPath) == "" {
+		socketPath = defaultDockerSocket
+	}
+
+	client := dockerSocketHTTPClient(socketPath)
+	return restartDockerContainerWithClient(client, "http://docker", container, verbose)
+}
+
+func dockerSocketHTTPClient(socketPath string) *http.Client {
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, network string, address string) (net.Conn, error) {
+			var dialer net.Dialer
+			return dialer.DialContext(ctx, "unix", socketPath)
+		},
+	}
+
+	return &http.Client{
+		Transport: transport,
+		Timeout:   30 * time.Second,
+	}
+}
+
+func restartDockerContainerWithClient(client *http.Client, baseURL string, container string, verbose bool) error {
+	container = strings.TrimSpace(container)
+	if container == "" {
+		return errors.New("restart container name is empty")
+	}
+
+	restartURL := strings.TrimRight(baseURL, "/") + "/containers/" + url.PathEscape(container) + "/restart?t=10"
+	req, err := http.NewRequest(http.MethodPost, restartURL, nil)
+	if err != nil {
+		return err
+	}
+
+	if verbose {
+		log.Printf("Restarting Docker Container: %s", container)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("docker restart %q failed: %w", container, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		bodyText := strings.TrimSpace(string(body))
+		if bodyText == "" {
+			bodyText = "<empty>"
+		}
+		return fmt.Errorf("docker restart %q failed: %s: %s", container, resp.Status, bodyText)
+	}
+
+	if verbose {
+		log.Printf("Restarted Docker Container: %s", container)
+	}
+
+	return nil
+}
+
 // ---------- generate ----------
 
 func buildGenerateCommand() *cli.Command {
@@ -515,6 +592,16 @@ func buildDaemonCommand() *cli.Command {
 				Usage: "Hook command to run after each successful config refresh. Placeholders: {config}, {state_dir}, {forwarded_port}, {port}.",
 				Value: "",
 			},
+			&cli.StringFlag{
+				Name:  "restart-container",
+				Usage: "Docker container to restart after each config refresh, using the mounted Docker socket",
+				Value: "",
+			},
+			&cli.StringFlag{
+				Name:  "docker-socket",
+				Usage: "Docker socket path used by --restart-container",
+				Value: defaultDockerSocket,
+			},
 		),
 		Action: runDaemon,
 	}
@@ -533,6 +620,8 @@ func runDaemon(c *cli.Context) error {
 	stateDir := strings.TrimSpace(c.String("state-dir"))
 	portHookCmd := c.String("on-port-change")
 	configHookCmd := c.String("on-config-change")
+	restartContainer := strings.TrimSpace(c.String("restart-container"))
+	dockerSocket := strings.TrimSpace(c.String("docker-socket"))
 
 	if region == "" {
 		region = defaultRegion
@@ -609,13 +698,13 @@ func runDaemon(c *cli.Context) error {
 		currentPort := lastPort
 		var refreshErr error
 		var refreshErrStage string
-		if err := runConfigHook(configHookCmd, stateDir, configPath, forwardedPortPath, currentPort, verbose); err != nil {
+		if err := runConfigChangeActions(configHookCmd, restartContainer, dockerSocket, stateDir, configPath, forwardedPortPath, currentPort, verbose); err != nil {
 			refreshErr = err
-			refreshErrStage = "config hook failed"
+			refreshErrStage = "config change action failed"
 			status.LastError = err.Error()
 			lease.disable()
 			if verbose {
-				log.Printf("Config Hook Failed: %v", err)
+				log.Printf("Config Change Action Failed: %v", err)
 			}
 		}
 

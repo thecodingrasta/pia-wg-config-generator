@@ -89,7 +89,6 @@ services:
       PIA_USERNAME: ${PIA_USERNAME}
       PIA_PASSWORD: ${PIA_PASSWORD}
       TZ: ${TZ}
-      GLUETUN_CONTAINER: gluetun
     command: >
       daemon
         --region=${PIA_REGION}
@@ -100,7 +99,7 @@ services:
         --retry-delay=5m
         --ipv6-mode=${IPV6_MODE}
         --wait-for-gateway
-        --on-config-change="/usr/local/bin/restart-gluetun"
+        --restart-container=gluetun
         --verbose
     volumes:
       - ./config/gluetun:/gluetun
@@ -143,17 +142,17 @@ After the first file exists, the daemon can run inside Gluetun's network namespa
 
 If you want `docker compose up` to bootstrap a completely empty directory without running the seed command first, Compose needs an extra one-shot seed/init service. That is the piece we removed to keep the long-running setup to one PIA container plus Gluetun.
 
-## Why `--on-config-change` Matters
+## Why `--restart-container` Matters
 
 PIA sessions are refreshed over time. A refreshed `wg0.conf` can change even when the forwarded port stays the same.
 
 Use:
 
 ```bash
---on-config-change="restart-gluetun"
+--restart-container=gluetun
 ```
 
-That restarts Gluetun after each config refresh. The daemon then waits for the PIA gateway before requesting port forwarding.
+That restarts Gluetun after each config refresh through Docker's API. The daemon then waits for the PIA gateway before requesting port forwarding.
 
 The long-running daemon runs with:
 
@@ -163,21 +162,14 @@ network_mode: "service:gluetun"
 
 That is required for PIA port forwarding because the PIA gateway endpoint, usually `10.100.0.1:19999`, is reachable only through the active VPN tunnel.
 
-The image includes:
-
-- `docker-cli`
-- `/usr/local/bin/restart-gluetun`
-
 For this to work, the daemon needs:
 
 ```yaml
-environment:
-  GLUETUN_CONTAINER: gluetun
 volumes:
   - /var/run/docker.sock:/var/run/docker.sock:ro
 ```
 
-If your Gluetun container has a different name, set `GLUETUN_CONTAINER` to that exact container name.
+If your Gluetun container has a different name, set `--restart-container` to that exact container name.
 
 ## Port Forwarding
 
@@ -197,7 +189,7 @@ When port forwarding succeeds, the daemon writes:
 
 Use that file from qBittorrent, scripts, or another sidecar if you need to update an application with the current port.
 
-`--on-port-change` is separate from `--on-config-change`. Use it only when another application needs to be told that the port changed:
+`--on-port-change` is separate from `--restart-container`. Use it only when another application needs to be told that the port changed:
 
 ```bash
 --on-port-change="/scripts/update-qbittorrent-port.sh {port}"
@@ -208,15 +200,9 @@ Use that file from qBittorrent, scripts, or another sidecar if you need to updat
 If your Gluetun container is named dynamically, for example `media-gluetun`, configure:
 
 ```yaml
-environment:
-  GLUETUN_CONTAINER: media-gluetun
-```
-
-or:
-
-```yaml
-environment:
-  GLUETUN_CONTAINER: ${STACK_PREFIX}-gluetun
+command: >
+  daemon
+    --restart-container=${STACK_PREFIX}-gluetun
 ```
 
 ## IPv6 Mode
@@ -259,21 +245,8 @@ docker compose logs -f gluetun
 If Gluetun does not restart after refresh, check:
 
 1. `/var/run/docker.sock` is mounted into `pia-wg-daemon`.
-2. `GLUETUN_CONTAINER` matches the actual Gluetun container name.
-3. `restart-gluetun` is present in the daemon image.
-
-If `restart-gluetun` is not found, rebuild the image without cache and recreate the containers:
-
-```bash
-docker build --no-cache -t pia-wg-config-generator:local .
-docker compose up -d --force-recreate
-```
-
-You can test the helper manually:
-
-```bash
-docker compose exec pia-wg-daemon restart-gluetun
-```
+2. `--restart-container` matches the actual Gluetun container name.
+3. The daemon image was rebuilt and the container was recreated after updating the binary.
 
 If `forwarded_port` is missing, check:
 

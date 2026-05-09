@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"flag"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -69,6 +71,7 @@ func TestBuildDaemonCommand_HasConfigRefreshHook(t *testing.T) {
 	foundConfigHook := false
 	foundRetryDelay := false
 	foundWaitForGateway := false
+	foundRestartContainer := false
 	for _, flag := range cmd.Flags {
 		if names := flag.Names(); len(names) > 0 && names[0] == "on-config-change" {
 			foundConfigHook = true
@@ -78,6 +81,9 @@ func TestBuildDaemonCommand_HasConfigRefreshHook(t *testing.T) {
 		}
 		if names := flag.Names(); len(names) > 0 && names[0] == "wait-for-gateway" {
 			foundWaitForGateway = true
+		}
+		if names := flag.Names(); len(names) > 0 && names[0] == "restart-container" {
+			foundRestartContainer = true
 		}
 	}
 
@@ -89,6 +95,9 @@ func TestBuildDaemonCommand_HasConfigRefreshHook(t *testing.T) {
 	}
 	if !foundWaitForGateway {
 		t.Fatalf("expected daemon command to expose --wait-for-gateway")
+	}
+	if !foundRestartContainer {
+		t.Fatalf("expected daemon command to expose --restart-container")
 	}
 }
 
@@ -162,5 +171,50 @@ func TestWaitForGateway_ReturnsClearErrorWhenUnreachable(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not reachable through the active tunnel") {
 		t.Fatalf("expected tunnel reachability error, got: %v", err)
+	}
+}
+
+func TestRestartDockerContainerWithClient_PostsRestartRequest(t *testing.T) {
+	var gotMethod string
+	var gotPath string
+	var gotQuery string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	err := restartDockerContainerWithClient(server.Client(), server.URL, "media-gluetun", false)
+	if err != nil {
+		t.Fatalf("expected docker restart request to succeed, got: %v", err)
+	}
+
+	if gotMethod != http.MethodPost {
+		t.Fatalf("expected POST, got %s", gotMethod)
+	}
+	if gotPath != "/containers/media-gluetun/restart" {
+		t.Fatalf("unexpected restart path: %s", gotPath)
+	}
+	if gotQuery != "t=10" {
+		t.Fatalf("unexpected restart query: %s", gotQuery)
+	}
+}
+
+func TestRestartDockerContainerWithClient_ReturnsDockerErrorBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"No such container"}`))
+	}))
+	defer server.Close()
+
+	err := restartDockerContainerWithClient(server.Client(), server.URL, "missing", false)
+	if err == nil {
+		t.Fatalf("expected docker restart error")
+	}
+	if !strings.Contains(err.Error(), "No such container") {
+		t.Fatalf("expected docker error body, got: %v", err)
 	}
 }

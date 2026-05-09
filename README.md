@@ -153,6 +153,8 @@ Common options:
 | `--wait-for-gateway` | | `true` | Wait for the PIA port-forwarding gateway before requesting a forwarded port |
 | `--gateway-timeout` | | `2m` | Maximum time to wait for the PIA gateway after a config refresh |
 | `--gateway-check-interval` | | `5s` | How often to check the PIA gateway while waiting |
+| `--restart-container` | | | Docker container to restart after each config refresh |
+| `--docker-socket` | | `/var/run/docker.sock` | Docker socket used by `--restart-container` |
 | `--on-config-change` | | | Shell command run after each successful config refresh |
 | `--on-port-change` | | | Shell command run only when the forwarded port changes |
 | `--ipv6-mode` | | `on` | `on`, `off`, or `kill` |
@@ -247,7 +249,6 @@ services:
     environment:
       PIA_USERNAME: ${PIA_USERNAME}
       PIA_PASSWORD: ${PIA_PASSWORD}
-      GLUETUN_CONTAINER: gluetun
     command: >
       daemon
         --region=${PIA_REGION}
@@ -257,7 +258,7 @@ services:
         --retry-delay=5m
         --ipv6-mode=${IPV6_MODE}
         --wait-for-gateway
-        --on-config-change="/usr/local/bin/restart-gluetun"
+        --restart-container=gluetun
         --verbose
     volumes:
       - ./config/gluetun:/gluetun
@@ -373,7 +374,7 @@ Port-forwarding flow:
 
 1. Authenticate and retrieve a token.
 2. Generate and write the refreshed WireGuard config.
-3. Run `--on-config-change` so Gluetun can restart on the new config.
+3. Restart Gluetun through Docker using `--restart-container`.
 4. Wait for the PIA gateway to be reachable through the active tunnel.
 5. Request a port-forwarding signature and bind the forwarded port.
 6. Renew the lease periodically.
