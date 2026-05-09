@@ -36,8 +36,13 @@ func findOpenSSLCurl(curlPath string) (string, bool, error) {
 func sanitizeBody(body []byte) string {
 	const maxLen = 512
 	s := strings.TrimSpace(string(body))
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\n", " | ")
 	if len(s) > maxLen {
 		return s[:maxLen] + " ...[truncated]"
+	}
+	if s == "" {
+		return "<empty>"
 	}
 	return s
 }

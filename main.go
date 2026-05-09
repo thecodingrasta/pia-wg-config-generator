@@ -25,6 +25,7 @@ const (
 	defaultRegion           = "amsterdam404"
 	defaultDaemonInterval   = 12 * time.Hour
 	defaultDaemonJitterMax  = 30 * time.Minute
+	defaultDaemonRetryDelay = 5 * time.Minute
 	defaultStatusFileName   = "status.json"
 	defaultConfigFileName   = "wg0.conf"
 	defaultForwardedPortOut = "forwarded_port"
@@ -481,6 +482,11 @@ func buildDaemonCommand() *cli.Command {
 				Usage: "Max jitter applied to the refresh interval",
 				Value: defaultDaemonJitterMax,
 			},
+			&cli.DurationFlag{
+				Name:  "retry-delay",
+				Usage: "How long to wait before retrying after a failed refresh",
+				Value: defaultDaemonRetryDelay,
+			},
 			&cli.StringFlag{
 				Name:  "on-port-change",
 				Usage: "Hook command to run when the forwarded port changes. Use {port} placeholder.",
@@ -525,10 +531,11 @@ func runDaemon(c *cli.Context) error {
 
 	interval := c.Duration("refresh-interval")
 	jitterMax := c.Duration("refresh-jitter")
+	retryDelay := c.Duration("retry-delay")
 
 	if verbose {
-		log.Printf("Daemon Starting. region=%s stateDir=%s interval=%s ipv6Mode=%s",
-			region, stateDir, interval, c.String("ipv6-mode"))
+		log.Printf("Daemon Starting. region=%s stateDir=%s interval=%s retryDelay=%s ipv6Mode=%s",
+			region, stateDir, interval, retryDelay, c.String("ipv6-mode"))
 	}
 
 	// Shared port-forwarding lease state — written by this goroutine,
@@ -554,7 +561,7 @@ func runDaemon(c *cli.Context) error {
 		if clientErr != nil {
 			status.LastError = clientErr.Error()
 			_ = writeStatus(statusPath, status)
-			sleepUntil(next, verbose)
+			sleepAfterFailure(retryDelay, verbose)
 			continue
 		}
 
@@ -567,14 +574,14 @@ func runDaemon(c *cli.Context) error {
 		if genErr != nil {
 			status.LastError = genErr.Error()
 			_ = writeStatus(statusPath, status)
-			sleepUntil(next, verbose)
+			sleepAfterFailure(retryDelay, verbose)
 			continue
 		}
 
 		if err := atomicWriteFile(configPath, []byte(gen.Config), 0644); err != nil {
 			status.LastError = err.Error()
 			_ = writeStatus(statusPath, status)
-			sleepUntil(next, verbose)
+			sleepAfterFailure(retryDelay, verbose)
 			continue
 		}
 
@@ -585,7 +592,7 @@ func runDaemon(c *cli.Context) error {
 				status.LastError = pfErr.Error()
 				lease.disable()
 				_ = writeStatus(statusPath, status)
-				sleepUntil(next, verbose)
+				sleepAfterFailure(retryDelay, verbose)
 				continue
 			}
 
@@ -595,7 +602,7 @@ func runDaemon(c *cli.Context) error {
 			if err := atomicWriteFile(forwardedPortPath, []byte(portStr), 0644); err != nil {
 				status.LastError = err.Error()
 				_ = writeStatus(statusPath, status)
-				sleepUntil(next, verbose)
+				sleepAfterFailure(retryDelay, verbose)
 				continue
 			}
 
@@ -703,6 +710,16 @@ func sleepUntil(t time.Time, verbose bool) {
 	}
 	if verbose {
 		log.Printf("Sleeping %s Until %s", d.Round(time.Second), t.Format(time.RFC3339))
+	}
+	time.Sleep(d)
+}
+
+func sleepAfterFailure(d time.Duration, verbose bool) {
+	if d <= 0 {
+		return
+	}
+	if verbose {
+		log.Printf("Refresh failed; retrying in %s", d.Round(time.Second))
 	}
 	time.Sleep(d)
 }

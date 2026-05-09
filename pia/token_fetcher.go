@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
-	"runtime"
 	"strings"
 	"time"
 
@@ -38,11 +37,9 @@ type curlResult struct {
 }
 
 func (p *PIAClient) fetchTokenViaCurl(ctx context.Context) (string, error) {
-	// 1) System curl first (works on Linux, will probably fail on Windows due to PIAs WAF).
+	// 1) System curl first. The project Docker image installs Alpine's
+	// OpenSSL-linked curl, so this path should work inside containers.
 	systemCurlPath, systemCurlOk := findSystemCurl()
-	if runtime.GOOS == "windows" {
-		systemCurlOk = false // TEMPORARY
-	}
 	// 2) Known-good OpenSSL curl path (included or user defined).
 	openSSLCurlPath, openSSLCurlOk, err := findOpenSSLCurl(p.curlPath)
 	if err != nil {
@@ -121,11 +118,7 @@ func (p *PIAClient) fetchTokenViaCurl(ctx context.Context) (string, error) {
 	}
 
 	if lastErr == nil {
-		// No curl available at all
-		if runtime.GOOS == "windows" {
-			return "", fmt.Errorf("%w (install OpenSSL Curl or set %s)", ErrCurlNotFound, openSSLCurlEnvHint())
-		}
-		return "", ErrCurlNotFound
+		return "", fmt.Errorf("%w (install curl or set %s)", ErrCurlNotFound, openSSLCurlEnvHint())
 	}
 
 	return "", lastErr
@@ -143,20 +136,19 @@ func runCurlTokenRequest(ctx context.Context, curlPath string, username string, 
 		piaTokenURL,
 	}
 
-	cmd := exec.CommandContext(ctx, curlPath, args...)
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
 	// Tight timeout outside if caller didn't set one.
 	// (Caller should pass ctx with timeout; but we also protect ourselves.)
 	var cancel context.CancelFunc
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 		ctx, cancel = context.WithTimeout(ctx, 25*time.Second)
 		defer cancel()
-		cmd = exec.CommandContext(ctx, curlPath, args...)
 	}
+
+	cmd := exec.CommandContext(ctx, curlPath, args...)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 
 	err := cmd.Run()
 	outBytes := stdout.Bytes()
@@ -244,14 +236,11 @@ func parseTokenFromCurlOutput(body []byte) (string, error) {
 }
 
 func findSystemCurl() (string, bool) {
-	// On Windows: curl.exe is usually present in System32
-	// On Linux/macOS: curl in PATH
-	name := "curl"
-	if runtime.GOOS == "windows" {
-		name = "curl.exe"
+	path, err := exec.LookPath("curl")
+	if err == nil && strings.TrimSpace(path) != "" {
+		return path, true
 	}
-
-	path, err := exec.LookPath(name)
+	path, err = exec.LookPath("curl.exe")
 	if err == nil && strings.TrimSpace(path) != "" {
 		return path, true
 	}

@@ -148,6 +148,7 @@ Common options:
 | `--state-dir` | | `/state` | Directory for generated state files |
 | `--refresh-interval` | | `12h` | How often to regenerate the config |
 | `--refresh-jitter` | | `30m` | Random jitter added to refresh timing |
+| `--retry-delay` | | `5m` | How long to wait before retrying after a failed refresh |
 | `--port-forwarding`, `-p` | | `false` | Acquire and renew a port-forwarding lease |
 | `--on-config-change` | | | Shell command run after each successful config refresh |
 | `--on-port-change` | | | Shell command run only when the forwarded port changes |
@@ -216,6 +217,7 @@ services:
         --state-dir=/gluetun/wireguard
         --port-forwarding
         --refresh-interval=12h
+        --retry-delay=5m
         --ipv6-mode=${IPV6_MODE}
         --on-config-change="restart-gluetun"
         --verbose

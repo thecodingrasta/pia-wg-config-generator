@@ -20,6 +20,8 @@ import (
 	"github.com/pkg/errors"
 )
 
+const defaultHTTPTimeout = 30 * time.Second
+
 type PIAWgClient interface {
 	GetToken() (string, error)
 	AddKey(token, publickey string) (AddKeyResult, error)
@@ -244,7 +246,8 @@ func (p *PIAClient) getMetadataServerForRegion() Server {
 func (p *PIAClient) getServerList() (PIAServerList, error) {
 	var serverList PIAServerList
 
-	resp, err := http.Get("https://serverlist.piaservers.net/vpninfo/servers/v6")
+	client := &http.Client{Timeout: defaultHTTPTimeout}
+	resp, err := client.Get("https://serverlist.piaservers.net/vpninfo/servers/v6")
 	if err != nil {
 		return PIAServerList{}, err
 	}
@@ -369,6 +372,7 @@ func (p *PIAClient) executePIARequest(server Server, rawURL, token string) (*htt
 	}
 
 	client := &http.Client{
+		Timeout: defaultHTTPTimeout,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{RootCAs: caCertPool},
 			DialContext:     dialContext,
@@ -402,7 +406,8 @@ func (p *PIAClient) downloadPIACertificate() error {
 		return nil
 	}
 
-	resp, err := http.Get("https://raw.githubusercontent.com/pia-foss/desktop/master/daemon/res/ca/rsa_4096.crt")
+	client := &http.Client{Timeout: defaultHTTPTimeout}
+	resp, err := client.Get("https://raw.githubusercontent.com/pia-foss/desktop/master/daemon/res/ca/rsa_4096.crt")
 	if err != nil {
 		return err
 	}

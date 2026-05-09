@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"flag"
 	"strings"
 	"testing"
+	"time"
 
 	cli "github.com/urfave/cli/v2"
 )
@@ -63,16 +65,22 @@ func TestBuildApp_HelpIncludesExamples(t *testing.T) {
 func TestBuildDaemonCommand_HasConfigRefreshHook(t *testing.T) {
 	cmd := buildDaemonCommand()
 
-	found := false
+	foundConfigHook := false
+	foundRetryDelay := false
 	for _, flag := range cmd.Flags {
 		if names := flag.Names(); len(names) > 0 && names[0] == "on-config-change" {
-			found = true
-			break
+			foundConfigHook = true
+		}
+		if names := flag.Names(); len(names) > 0 && names[0] == "retry-delay" {
+			foundRetryDelay = true
 		}
 	}
 
-	if !found {
+	if !foundConfigHook {
 		t.Fatalf("expected daemon command to expose --on-config-change")
+	}
+	if !foundRetryDelay {
+		t.Fatalf("expected daemon command to expose --retry-delay")
 	}
 }
 
@@ -88,5 +96,31 @@ func TestExpandConfigHookCommand_ReplacesAllPlaceholders(t *testing.T) {
 
 	if got != want {
 		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+func TestDaemonRetryDelayDefault(t *testing.T) {
+	cmd := buildDaemonCommand()
+	set := flag.NewFlagSet("daemon", flag.ContinueOnError)
+	for _, f := range cmd.Flags {
+		if err := f.Apply(set); err != nil {
+			t.Fatalf("applying flag: %v", err)
+		}
+	}
+
+	c := cli.NewContext(nil, set, nil)
+	if got := c.Duration("retry-delay"); got != defaultDaemonRetryDelay {
+		t.Fatalf("expected retry-delay %s, got %s", defaultDaemonRetryDelay, got)
+	}
+	if defaultDaemonRetryDelay >= defaultDaemonInterval {
+		t.Fatalf("retry delay must be shorter than refresh interval")
+	}
+}
+
+func TestSleepAfterFailure_ZeroReturnsImmediately(t *testing.T) {
+	start := time.Now()
+	sleepAfterFailure(0, false)
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("expected zero retry delay to return immediately, took %s", elapsed)
 	}
 }

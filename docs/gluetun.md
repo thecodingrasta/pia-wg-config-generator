@@ -54,6 +54,7 @@ services:
         --port-forwarding
         --refresh-interval=12h
         --refresh-jitter=30m
+        --retry-delay=5m
         --ipv6-mode=${IPV6_MODE}
         --on-config-change="restart-gluetun"
         --verbose
