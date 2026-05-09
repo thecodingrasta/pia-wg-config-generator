@@ -466,3 +466,43 @@ func (p *PIAClient) GetAvailableRegions() ([]RegionInfo, error) {
 	}
 	return regions, nil
 }
+
+func (p *PIAClient) resolveRegionID(input string, list PIAServerList) (string, error) {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return "", errors.New("Region Cannot Be Empty")
+	}
+
+	needle := strings.ToLower(trimmed)
+
+	for _, r := range list.Regions {
+		if strings.ToLower(r.ID) == needle {
+			return r.ID, nil
+		}
+		if strings.ToLower(r.Name) == needle {
+			return r.ID, nil
+		}
+	}
+
+	return "", errors.New("Unknown Region: " + input)
+}
+
+func (p *PIAClient) GetAvailableRegions() ([]RegionInfo, error) {
+	serverList, err := p.getServerList()
+	if err != nil {
+		return nil, err
+	}
+
+	regions := make([]RegionInfo, 0, len(serverList.Regions))
+	for _, r := range serverList.Regions {
+		regions = append(regions, RegionInfo{
+			ID:          r.ID,
+			Name:        r.Name,
+			Country:     r.Country,
+			AutoRegion:  r.AutoRegion,
+			PortForward: r.PortForward,
+		})
+	}
+
+	return regions, nil
+}

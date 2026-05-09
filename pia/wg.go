@@ -59,6 +59,11 @@ type GenerateResult struct {
 	Key    AddKeyResult
 }
 
+type GenerateResult struct {
+	Config string
+	Key    AddKeyResult
+}
+
 func NewPIAWgGenerator(pia PIAWgClient, config PIAWgGeneratorConfig) *PIAWgGenerator {
 	return &PIAWgGenerator{
 		pia:        pia,

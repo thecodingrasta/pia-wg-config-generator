@@ -1064,3 +1064,298 @@ func applyJitter(interval time.Duration, jitterMax time.Duration) time.Duration 
 	offset := time.Duration(n.Int64()) - (jitterMax / 2)
 	return interval + offset
 }
+
+// ---------- Daemon ----------
+
+type daemonStatus struct {
+	Region            string    `json:"region"`
+	LastGenerateUTC   time.Time `json:"last_generate_utc"`
+	LastForwardPort   string    `json:"last_forward_port,omitempty"`
+	LastError         string    `json:"last_error,omitempty"`
+	NextRefreshUTC    time.Time `json:"next_refresh_utc"`
+	PortForwarding    bool      `json:"port_forwarding"`
+	ServerNameEnabled bool      `json:"server_name_enabled"`
+}
+
+func buildDaemonCommand() *cli.Command {
+	return &cli.Command{
+		Name:  "daemon",
+		Usage: "Run Continuously: Refresh WireGuard configs and maintain port forwarding",
+		Flags: append(buildAuthFlags(),
+			&cli.StringFlag{
+				Name:  "state-dir",
+				Usage: "Directory to write state files (config, status, forwarded port)",
+				Value: "/state",
+			},
+			&cli.StringFlag{
+				Name:    "region",
+				Aliases: []string{"r"},
+				Value:   defaultRegion,
+				Usage:   "PIA Region ID or friendly name",
+			},
+			&cli.BoolFlag{
+				Name:    "server",
+				Aliases: []string{"s"},
+				Value:   false,
+				Usage:   "Include server common name metadata in the config",
+			},
+			&cli.BoolFlag{
+				Name:    "port-forwarding",
+				Aliases: []string{"p"},
+				Value:   false,
+				Usage:   "Acquire and renew a PIA port forwarding lease",
+			},
+			&cli.DurationFlag{
+				Name:  "refresh-interval",
+				Usage: "How often to regenerate the WireGuard config (jitter is applied)",
+				Value: defaultDaemonInterval,
+			},
+			&cli.DurationFlag{
+				Name:  "refresh-jitter",
+				Usage: "Max jitter applied to the refresh interval",
+				Value: defaultDaemonJitterMax,
+			},
+			&cli.StringFlag{
+				Name:  "on-port-change",
+				Usage: "Hook command to run when forwarded port changes. Use {port} placeholder.",
+				Value: "",
+			},
+		),
+		Action: runDaemon,
+	}
+}
+
+func runDaemon(c *cli.Context) error {
+	username, password, err := resolveCredentials(c)
+	if err != nil {
+		return err
+	}
+
+	verbose := c.Bool("verbose")
+	serverName := c.Bool("server")
+	portForwarding := c.Bool("port-forwarding")
+	region := strings.TrimSpace(c.String("region"))
+	stateDir := strings.TrimSpace(c.String("state-dir"))
+	hookCmd := c.String("on-port-change")
+
+	if region == "" {
+		region = defaultRegion
+	}
+
+	configPath := mustStatePath(stateDir, defaultConfigFileName)
+	statusPath := mustStatePath(stateDir, defaultStatusFileName)
+	forwardedPortPath := mustStatePath(stateDir, defaultForwardedPortOut)
+
+	interval := c.Duration("refresh-interval")
+	jitterMax := c.Duration("refresh-jitter")
+
+	if verbose {
+		log.Printf("Daemon Starting. region=%s stateDir=%s interval=%s", region, stateDir, interval)
+	}
+
+	// PF lease state + renew loop
+	lease := &pfLeaseState{}
+	startPFRenewLoop(lease, verbose)
+
+	var lastPort string
+
+	for {
+		next := time.Now().UTC().Add(applyJitter(interval, jitterMax))
+
+		status := daemonStatus{
+			Region:            region,
+			LastGenerateUTC:   time.Now().UTC(),
+			NextRefreshUTC:    next,
+			PortForwarding:    portForwarding,
+			ServerNameEnabled: serverName,
+		}
+
+		piaClient, clientErr := pia.NewPIAClient(username, password, region, verbose, portForwarding)
+		if clientErr != nil {
+			status.LastError = clientErr.Error()
+			_ = writeStatus(statusPath, status)
+			sleepUntil(next, verbose)
+			continue
+		}
+
+		wgConfigGenerator := pia.NewPIAWgGenerator(
+			piaClient,
+			pia.PIAWgGeneratorConfig{Verbose: verbose, ServerName: serverName},
+		)
+
+		gen, genErr := wgConfigGenerator.GenerateWithMetadata()
+		if genErr != nil {
+			status.LastError = genErr.Error()
+			_ = writeStatus(statusPath, status)
+			sleepUntil(next, verbose)
+			continue
+		}
+
+		if err := atomicWriteFile(configPath, []byte(gen.Config), 0644); err != nil {
+			status.LastError = err.Error()
+			_ = writeStatus(statusPath, status)
+			sleepUntil(next, verbose)
+			continue
+		}
+
+		// Port forwarding: acquire lease + write forwarded_port + update renew state.
+		if portForwarding {
+			portStr, pfErr := acquireAndBindPort(piaClient, gen.Key, verbose)
+			if pfErr != nil {
+				status.LastError = pfErr.Error()
+				_ = writeStatus(statusPath, status)
+				sleepUntil(next, verbose)
+				continue
+			}
+
+			status.LastForwardPort = portStr
+
+			if err := atomicWriteFile(forwardedPortPath, []byte(portStr), 0644); err != nil {
+				status.LastError = err.Error()
+				_ = writeStatus(statusPath, status)
+				sleepUntil(next, verbose)
+				continue
+			}
+
+			if portStr != lastPort {
+				lastPort = portStr
+				_ = runHook(hookCmd, portStr, verbose)
+			}
+
+			// Update renew loop state.
+			// If gateway/signature changes (e.g. new server), renew loop follows the new values.
+			updateLeaseState(lease, piaClient, gen.Key, portStr, verbose)
+		}
+
+		_ = writeStatus(statusPath, status)
+
+		if verbose {
+			log.Printf("Updated: %s (pf=%t)", configPath, portForwarding)
+		}
+
+		sleepUntil(next, verbose)
+	}
+}
+
+func acquireAndBindPort(piaClient *pia.PIAClient, keyMeta pia.AddKeyResult, verbose bool) (string, error) {
+	// Determine Gateway
+	gateway := strings.TrimSpace(keyMeta.Gateway)
+	if gateway == "" {
+		gateway = strings.TrimSpace(keyMeta.ServerVip)
+	}
+	if gateway == "" {
+		return "", errors.New("port forwarding enabled but no gateway/server_vip returned by API")
+	}
+
+	token, err := piaClient.GetToken()
+	if err != nil {
+		return "", err
+	}
+
+	pfClient := pia.NewPFClient(verbose)
+
+	sig, payload, err := pfClient.GetSignature(gateway, token)
+	if err != nil {
+		return "", err
+	}
+
+	if err := pfClient.BindPort(gateway, sig); err != nil {
+		return "", err
+	}
+
+	return strconv.Itoa(payload.Port), nil
+}
+
+func updateLeaseState(lease *pfLeaseState, piaClient *pia.PIAClient, keyMeta pia.AddKeyResult, portStr string, verbose bool) {
+	gateway := strings.TrimSpace(keyMeta.Gateway)
+	if gateway == "" {
+		gateway = strings.TrimSpace(keyMeta.ServerVip)
+	}
+	if gateway == "" {
+		lease.Enabled = false
+		return
+	}
+
+	token, err := piaClient.GetToken()
+	if err != nil {
+		if verbose {
+			log.Printf("PF Lease Update Token Error: %v", err)
+		}
+		lease.Enabled = false
+		return
+	}
+
+	pfClient := pia.NewPFClient(verbose)
+	sig, _, err := pfClient.GetSignature(gateway, token)
+	if err != nil {
+		if verbose {
+			log.Printf("PF Lease Update Signature Error: %v", err)
+		}
+		lease.Enabled = false
+		return
+	}
+
+	lease.Enabled = true
+	lease.Gateway = gateway
+	lease.Signature = sig
+	lease.Port = portStr
+}
+
+func startPFRenewLoop(lease *pfLeaseState, verbose bool) {
+	go func() {
+		ticker := time.NewTicker(defaultPFRenewInterval)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			if !lease.Enabled {
+				continue
+			}
+
+			pfClient := pia.NewPFClient(verbose)
+			if err := pfClient.BindPort(lease.Gateway, lease.Signature); err != nil {
+				if verbose {
+					log.Printf("PF Renew Failed: %v", err)
+				}
+				continue
+			}
+
+			if verbose {
+				log.Printf("PF Renewed (Port %s)", lease.Port)
+			}
+		}
+	}()
+}
+
+func writeStatus(path string, status daemonStatus) error {
+	data, err := json.MarshalIndent(status, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWriteFile(path, data, 0644)
+}
+
+func sleepUntil(t time.Time, verbose bool) {
+	d := time.Until(t)
+	if d <= 0 {
+		return
+	}
+	if verbose {
+		log.Printf("Sleeping %s Until %s", d.Round(time.Second), t.Format(time.RFC3339))
+	}
+	time.Sleep(d)
+}
+
+func applyJitter(interval time.Duration, jitterMax time.Duration) time.Duration {
+	if jitterMax <= 0 {
+		return interval
+	}
+
+	max := big.NewInt(int64(jitterMax))
+	n, err := rand.Int(rand.Reader, max)
+	if err != nil {
+		return interval
+	}
+
+	offset := time.Duration(n.Int64()) - (jitterMax / 2)
+	return interval + offset
+}
