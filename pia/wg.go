@@ -10,12 +10,26 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
+// IPv6Mode controls how IPv6 traffic is handled in the generated WireGuard config.
+type IPv6Mode int
+
+const (
+	// IPv6ModeOn routes all traffic including IPv6 through the VPN (default).
+	IPv6ModeOn IPv6Mode = iota
+	// IPv6ModeOff produces an IPv4-only config (AllowedIPs = 0.0.0.0/0).
+	IPv6ModeOff
+	// IPv6ModeKill routes IPv6 through the VPN and adds ip6tables PostUp/PostDown
+	// rules as a killswitch — blocking any IPv6 traffic not going through the tunnel.
+	IPv6ModeKill
+)
+
 type PIAWgGenerator struct {
 	pia        PIAWgClient
 	verbose    bool
 	serverName bool
 	privatekey string
 	publickey  string
+	ipv6Mode   IPv6Mode
 }
 
 type PIAWgGeneratorConfig struct {
@@ -23,6 +37,7 @@ type PIAWgGeneratorConfig struct {
 	ServerName bool
 	PrivateKey string
 	PublicKey  string
+	IPv6Mode   IPv6Mode
 }
 
 type templateConfig struct {
@@ -35,6 +50,13 @@ type templateConfig struct {
 	PublicKey           string
 	PersistentKeepalive string
 	ServerCommonName    string
+	PostUp              string
+	PostDown            string
+}
+
+type GenerateResult struct {
+	Config string
+	Key    AddKeyResult
 }
 
 type GenerateResult struct {
@@ -49,10 +71,11 @@ func NewPIAWgGenerator(pia PIAWgClient, config PIAWgGeneratorConfig) *PIAWgGener
 		serverName: config.ServerName,
 		privatekey: config.PrivateKey,
 		publickey:  config.PublicKey,
+		ipv6Mode:   config.IPv6Mode,
 	}
 }
 
-// Generate - retains backwards compatibility (string only).
+// Generate retains backwards compatibility (string only).
 func (p *PIAWgGenerator) Generate() (string, error) {
 	result, err := p.GenerateWithMetadata()
 	if err != nil {
@@ -70,7 +93,7 @@ func (p *PIAWgGenerator) GenerateWithMetadata() (GenerateResult, error) {
 	}
 	token, err := p.pia.GetToken()
 	if err != nil {
-		return result, errors.Wrap(err, "Error Getting Pia Token")
+		return result, errors.Wrap(err, "Error Getting PIA Token")
 	}
 
 	if p.verbose {
@@ -82,11 +105,16 @@ func (p *PIAWgGenerator) GenerateWithMetadata() (GenerateResult, error) {
 	}
 
 	if p.verbose {
-		log.Println("Registering Wire Guard Public Key With PIA")
+		log.Println("Registering WireGuard Public Key With PIA")
 	}
 	key, err := p.pia.AddKey(token, publickey)
 	if err != nil {
 		return result, errors.Wrap(err, "Error Adding WireGuard Public Key To PIA Account")
+	}
+
+	// The API may return a non-OK status with HTTP 200; treat it as an error.
+	if key.Status != "" && key.Status != "OK" {
+		return result, errors.Errorf("AddKey returned non-OK status: %s", key.Status)
 	}
 
 	if p.verbose {
@@ -94,7 +122,7 @@ func (p *PIAWgGenerator) GenerateWithMetadata() (GenerateResult, error) {
 	}
 	config, err := p.generateConfig(key, privatekey)
 	if err != nil {
-		return result, errors.Wrap(err, "Error Generating Wire Guard Config")
+		return result, errors.Wrap(err, "Error Generating WireGuard Config")
 	}
 
 	result.Config = config
@@ -146,6 +174,22 @@ func (p *PIAWgGenerator) generateConfig(key AddKeyResult, privatekey string) (st
 		return "", errors.New("No DNS Servers Returned By API")
 	}
 
+	// Determine AllowedIPs and optional firewall hooks based on IPv6 mode.
+	var allowedIPs, postUp, postDown string
+	switch p.ipv6Mode {
+	case IPv6ModeOff:
+		// IPv4-only tunnel — drop all IPv6.
+		allowedIPs = "0.0.0.0/0"
+	case IPv6ModeKill:
+		// Route IPv6 through VPN and enforce a killswitch via ip6tables.
+		allowedIPs = "0.0.0.0/0, ::/0"
+		postUp = "ip6tables -I OUTPUT ! -o %i -j REJECT"
+		postDown = "ip6tables -D OUTPUT ! -o %i -j REJECT"
+	default: // IPv6ModeOn
+		// Route all traffic including IPv6 through VPN.
+		allowedIPs = "0.0.0.0/0, ::/0"
+	}
+
 	tc := templateConfig{
 		PrivateKey:          privatekey,
 		PublicKey:           key.ServerKey,
@@ -153,9 +197,11 @@ func (p *PIAWgGenerator) generateConfig(key AddKeyResult, privatekey string) (st
 		EndpointPort:        endpointPort,
 		DNS:                 key.DNSServers[0],
 		Address:             key.PeerIP,
-		AllowedIPs:          "0.0.0.0/0",
+		AllowedIPs:          allowedIPs,
 		PersistentKeepalive: "25",
 		ServerCommonName:    serverCommonName,
+		PostUp:              postUp,
+		PostDown:            postDown,
 	}
 
 	var buf bytes.Buffer
@@ -166,15 +212,22 @@ func (p *PIAWgGenerator) generateConfig(key AddKeyResult, privatekey string) (st
 	return buf.String(), nil
 }
 
+// wireguardConfigTemplate is a standard WireGuard INI config.
+// ServerCommonName is written as a comment — it is not a valid WireGuard key
+// and would cause wg / wg-quick to reject the config if written bare.
 var wireguardConfigTemplate = `[Interface]
 PrivateKey = {{.PrivateKey}}
 Address = {{.Address}}
 DNS = {{.DNS}}
+{{- if .PostUp }}
+PostUp = {{.PostUp}}
+PostDown = {{.PostDown}}
+{{- end }}
 [Peer]
 PublicKey = {{.PublicKey}}
 AllowedIPs = {{.AllowedIPs}}
 Endpoint = {{.Endpoint}}:{{.EndpointPort}}
 PersistentKeepalive = {{.PersistentKeepalive}}
 {{- if .ServerCommonName }}
-ServerCommonName = {{.ServerCommonName}}
+# ServerCommonName = {{.ServerCommonName}}
 {{- end }}`
