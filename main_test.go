@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"flag"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -67,12 +68,16 @@ func TestBuildDaemonCommand_HasConfigRefreshHook(t *testing.T) {
 
 	foundConfigHook := false
 	foundRetryDelay := false
+	foundWaitForGateway := false
 	for _, flag := range cmd.Flags {
 		if names := flag.Names(); len(names) > 0 && names[0] == "on-config-change" {
 			foundConfigHook = true
 		}
 		if names := flag.Names(); len(names) > 0 && names[0] == "retry-delay" {
 			foundRetryDelay = true
+		}
+		if names := flag.Names(); len(names) > 0 && names[0] == "wait-for-gateway" {
+			foundWaitForGateway = true
 		}
 	}
 
@@ -81,6 +86,9 @@ func TestBuildDaemonCommand_HasConfigRefreshHook(t *testing.T) {
 	}
 	if !foundRetryDelay {
 		t.Fatalf("expected daemon command to expose --retry-delay")
+	}
+	if !foundWaitForGateway {
+		t.Fatalf("expected daemon command to expose --wait-for-gateway")
 	}
 }
 
@@ -122,5 +130,37 @@ func TestSleepAfterFailure_ZeroReturnsImmediately(t *testing.T) {
 	sleepAfterFailure("test failure", nil, 0, false)
 	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
 		t.Fatalf("expected zero retry delay to return immediately, took %s", elapsed)
+	}
+}
+
+func TestWaitForGateway_ReturnsWhenReachable(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		conn, err := listener.Accept()
+		if err == nil {
+			_ = conn.Close()
+		}
+	}()
+
+	if err := waitForGateway(listener.Addr().String(), time.Second, 10*time.Millisecond, false); err != nil {
+		t.Fatalf("expected reachable gateway, got: %v", err)
+	}
+	<-done
+}
+
+func TestWaitForGateway_ReturnsClearErrorWhenUnreachable(t *testing.T) {
+	err := waitForGateway("127.0.0.1:1", 20*time.Millisecond, 10*time.Millisecond, false)
+	if err == nil {
+		t.Fatalf("expected unreachable gateway error")
+	}
+	if !strings.Contains(err.Error(), "not reachable through the active tunnel") {
+		t.Fatalf("expected tunnel reachability error, got: %v", err)
 	}
 }

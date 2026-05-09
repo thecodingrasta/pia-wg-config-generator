@@ -175,3 +175,19 @@ func TestPFClient_BindPort_OK(t *testing.T) {
 		t.Fatalf("Expected no error on successful BindPort, got: %v", err)
 	}
 }
+
+func TestNormalizeGateway(t *testing.T) {
+	tests := map[string]string{
+		"":                    "",
+		"10.100.0.1":          "10.100.0.1:19999",
+		" 10.100.0.1 ":        "10.100.0.1:19999",
+		"10.100.0.1:19999":    "10.100.0.1:19999",
+		"example.invalid:443": "example.invalid:443",
+	}
+
+	for input, want := range tests {
+		if got := NormalizeGateway(input); got != want {
+			t.Fatalf("NormalizeGateway(%q) = %q, want %q", input, got, want)
+		}
+	}
+}

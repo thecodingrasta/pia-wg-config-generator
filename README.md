@@ -150,6 +150,9 @@ Common options:
 | `--refresh-jitter` | | `30m` | Random jitter added to refresh timing |
 | `--retry-delay` | | `5m` | How long to wait before retrying after a failed refresh |
 | `--port-forwarding`, `-p` | | `false` | Acquire and renew a port-forwarding lease |
+| `--wait-for-gateway` | | `true` | Wait for the PIA port-forwarding gateway before requesting a forwarded port |
+| `--gateway-timeout` | | `2m` | Maximum time to wait for the PIA gateway after a config refresh |
+| `--gateway-check-interval` | | `5s` | How often to check the PIA gateway while waiting |
 | `--on-config-change` | | | Shell command run after each successful config refresh |
 | `--on-port-change` | | | Shell command run only when the forwarded port changes |
 | `--ipv6-mode` | | `on` | `on`, `off`, or `kill` |
@@ -189,10 +192,10 @@ This is the recommended long-running setup.
 
 The important pieces are:
 
-1. The daemon writes `wg0.conf` to `/gluetun/wireguard/wg0.conf`.
-2. Gluetun waits until that file exists before starting.
-3. The daemon restarts Gluetun after every successful config refresh.
-4. If port forwarding is enabled, the daemon writes the active port to `/gluetun/wireguard/forwarded_port`.
+1. Build the image locally and use it by tag in Compose.
+2. Seed the first `/gluetun/wireguard/wg0.conf` once if the file does not exist yet.
+3. Run the long-running daemon inside Gluetun's network namespace.
+4. The daemon refreshes `wg0.conf`, restarts Gluetun, waits for the PIA gateway, then renews/writes `forwarded_port`.
 
 Build the image once:
 
@@ -200,38 +203,22 @@ Build the image once:
 docker build -t pia-wg-config-generator:local .
 ```
 
+Seed the initial config once on a new install:
+
+```bash
+docker run --rm --env-file .env -v ./config/gluetun:/gluetun pia-wg-config-generator:local generate --region=${PIA_REGION} --port-forwarding --ipv6-mode=${IPV6_MODE} --outfile=/gluetun/wireguard/wg0.conf --verbose
+```
+
+That seed step is the startup barrier for a fresh install. After it has created `./config/gluetun/wireguard/wg0.conf`, Compose starts in this order:
+
+1. `gluetun` starts from the existing config.
+2. `gluetun` becomes healthy.
+3. `pia-wg-daemon` starts because it depends on `gluetun: service_healthy`.
+
 Then use it in Compose:
 
 ```yaml
 services:
-  pia-wg-daemon:
-    image: pia-wg-config-generator:local
-    container_name: pia-wg-daemon
-    environment:
-      PIA_USERNAME: ${PIA_USERNAME}
-      PIA_PASSWORD: ${PIA_PASSWORD}
-      GLUETUN_CONTAINER: gluetun
-    command: >
-      daemon
-        --region=${PIA_REGION}
-        --state-dir=/gluetun/wireguard
-        --port-forwarding
-        --refresh-interval=12h
-        --retry-delay=5m
-        --ipv6-mode=${IPV6_MODE}
-        --on-config-change="restart-gluetun"
-        --verbose
-    volumes:
-      - ./config/gluetun:/gluetun
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    healthcheck:
-      test: ["CMD-SHELL", "test -s /gluetun/wireguard/wg0.conf"]
-      interval: 5s
-      timeout: 3s
-      retries: 60
-      start_period: 5s
-    restart: unless-stopped
-
   gluetun:
     image: qmcgaw/gluetun:latest
     container_name: gluetun
@@ -245,8 +232,38 @@ services:
       UPDATER_PERIOD: 0
     volumes:
       - ./config/gluetun:/gluetun
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- https://api.ipify.org >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  pia-wg-daemon:
+    image: pia-wg-config-generator:local
+    container_name: pia-wg-daemon
+    network_mode: "service:gluetun"
+    environment:
+      PIA_USERNAME: ${PIA_USERNAME}
+      PIA_PASSWORD: ${PIA_PASSWORD}
+      GLUETUN_CONTAINER: gluetun
+    command: >
+      daemon
+        --region=${PIA_REGION}
+        --state-dir=/gluetun/wireguard
+        --port-forwarding
+        --refresh-interval=12h
+        --retry-delay=5m
+        --ipv6-mode=${IPV6_MODE}
+        --wait-for-gateway
+        --on-config-change="/usr/local/bin/restart-gluetun"
+        --verbose
+    volumes:
+      - ./config/gluetun:/gluetun
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     depends_on:
-      pia-wg-daemon:
+      gluetun:
         condition: service_healthy
     restart: unless-stopped
 ```
@@ -355,12 +372,13 @@ Token acquisition strategy:
 Port-forwarding flow:
 
 1. Authenticate and retrieve a token.
-2. Request a port-forwarding signature.
-3. Bind the forwarded port.
-4. Renew the lease periodically.
-5. Write the active port to `forwarded_port`.
-6. Run `--on-port-change` if the port changes.
-7. Run `--on-config-change` after a successful config refresh.
+2. Generate and write the refreshed WireGuard config.
+3. Run `--on-config-change` so Gluetun can restart on the new config.
+4. Wait for the PIA gateway to be reachable through the active tunnel.
+5. Request a port-forwarding signature and bind the forwarded port.
+6. Renew the lease periodically.
+7. Write the active port to `forwarded_port`.
+8. Run `--on-port-change` if the port changes.
 
 ---
 

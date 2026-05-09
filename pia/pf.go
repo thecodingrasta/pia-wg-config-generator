@@ -128,7 +128,7 @@ func (p *PFClient) BindPort(gateway string, sig PFSignatureResponse) error {
 	return nil
 }
 
-func normalizeGateway(gateway string) string {
+func NormalizeGateway(gateway string) string {
 	gw := strings.TrimSpace(gateway)
 	if gw == "" {
 		return ""
@@ -141,4 +141,8 @@ func normalizeGateway(gateway string) string {
 
 	// Default to PIA's port-forwarding port.
 	return gw + ":19999"
+}
+
+func normalizeGateway(gateway string) string {
+	return NormalizeGateway(gateway)
 }

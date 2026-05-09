@@ -1,13 +1,14 @@
 # Docker + Gluetun Setup
 
-This guide shows the recommended setup: run `pia-wg-config` as a sidecar daemon, let it generate and refresh the PIA WireGuard config, and let Gluetun consume that generated config.
+This guide shows the recommended setup: build the `pia-wg-config` image locally, seed the first WireGuard config once, then run the daemon inside Gluetun's network namespace so it can refresh the config and maintain PIA port forwarding.
 
 The simple version:
 
 1. Build the daemon image once.
-2. Run the daemon and Gluetun against the same `./config/gluetun` directory.
-3. Make Gluetun wait until `wg0.conf` exists.
-4. Restart Gluetun after every successful config refresh.
+2. Generate the first `wg0.conf` once if this is a fresh install.
+3. Start Gluetun from that config.
+4. Run the long-running daemon inside Gluetun's network namespace.
+5. On every refresh, the daemon writes `wg0.conf`, restarts Gluetun, waits for the PIA gateway, then writes/renews `forwarded_port`.
 
 ## 1. Build the Image
 
@@ -35,40 +36,29 @@ IPV6_MODE=kill
 TZ=Europe/London
 ```
 
-## 3. Compose File
+## 3. Seed the First Config
+
+Gluetun cannot start without an initial WireGuard config. Generate it once before the first `docker compose up`:
+
+```bash
+docker run --rm --env-file .env -v ./config/gluetun:/gluetun pia-wg-config-generator:local generate --region=${PIA_REGION} --port-forwarding --ipv6-mode=${IPV6_MODE} --outfile=/gluetun/wireguard/wg0.conf --verbose
+```
+
+After that, the daemon keeps the file refreshed.
+
+This seed step replaces a Compose init container. It is required only when `./config/gluetun/wireguard/wg0.conf` does not exist yet.
+
+Startup order after seeding:
+
+1. Gluetun starts from the existing `wg0.conf`.
+2. Gluetun passes its healthcheck.
+3. `pia-wg-daemon` starts because it depends on `gluetun: service_healthy`.
+4. On future refreshes, the daemon writes a new config, restarts Gluetun, waits for the PIA gateway, then updates `forwarded_port`.
+
+## 4. Compose File
 
 ```yaml
 services:
-  pia-wg-daemon:
-    image: pia-wg-config-generator:local
-    container_name: pia-wg-daemon
-    environment:
-      PIA_USERNAME: ${PIA_USERNAME}
-      PIA_PASSWORD: ${PIA_PASSWORD}
-      TZ: ${TZ}
-      GLUETUN_CONTAINER: gluetun
-    command: >
-      daemon
-        --region=${PIA_REGION}
-        --state-dir=/gluetun/wireguard
-        --port-forwarding
-        --refresh-interval=12h
-        --refresh-jitter=30m
-        --retry-delay=5m
-        --ipv6-mode=${IPV6_MODE}
-        --on-config-change="restart-gluetun"
-        --verbose
-    volumes:
-      - ./config/gluetun:/gluetun
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    healthcheck:
-      test: ["CMD-SHELL", "test -s /gluetun/wireguard/wg0.conf"]
-      interval: 5s
-      timeout: 3s
-      retries: 60
-      start_period: 5s
-    restart: unless-stopped
-
   gluetun:
     image: qmcgaw/gluetun:latest
     container_name: gluetun
@@ -83,9 +73,6 @@ services:
       UPDATER_PERIOD: 0
     volumes:
       - ./config/gluetun:/gluetun
-    depends_on:
-      pia-wg-daemon:
-        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- https://api.ipify.org >/dev/null 2>&1 || exit 1"]
@@ -93,6 +80,35 @@ services:
       timeout: 10s
       retries: 10
       start_period: 60s
+
+  pia-wg-daemon:
+    image: pia-wg-config-generator:local
+    container_name: pia-wg-daemon
+    network_mode: "service:gluetun"
+    environment:
+      PIA_USERNAME: ${PIA_USERNAME}
+      PIA_PASSWORD: ${PIA_PASSWORD}
+      TZ: ${TZ}
+      GLUETUN_CONTAINER: gluetun
+    command: >
+      daemon
+        --region=${PIA_REGION}
+        --state-dir=/gluetun/wireguard
+        --port-forwarding
+        --refresh-interval=12h
+        --refresh-jitter=30m
+        --retry-delay=5m
+        --ipv6-mode=${IPV6_MODE}
+        --wait-for-gateway
+        --on-config-change="/usr/local/bin/restart-gluetun"
+        --verbose
+    volumes:
+      - ./config/gluetun:/gluetun
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    restart: unless-stopped
 ```
 
 Start it:
@@ -119,17 +135,13 @@ On the host, these are under:
 ./config/gluetun/wireguard/
 ```
 
-## Why the Healthcheck Matters
+## Why the First Config Is Separate
 
-Plain `depends_on` only starts containers in order. It does not wait until the first container is ready.
+PIA port forwarding is only available through the active VPN tunnel, but Gluetun needs `wg0.conf` before it can create that tunnel. That means a completely empty install needs one seed command.
 
-This healthcheck:
+After the first file exists, the daemon can run inside Gluetun's network namespace and handle refreshes continuously.
 
-```yaml
-test: ["CMD-SHELL", "test -s /gluetun/wireguard/wg0.conf"]
-```
-
-makes Compose wait until the daemon has written a non-empty WireGuard config before starting Gluetun.
+If you want `docker compose up` to bootstrap a completely empty directory without running the seed command first, Compose needs an extra one-shot seed/init service. That is the piece we removed to keep the long-running setup to one PIA container plus Gluetun.
 
 ## Why `--on-config-change` Matters
 
@@ -141,7 +153,17 @@ Use:
 --on-config-change="restart-gluetun"
 ```
 
-That restarts Gluetun after each successful config refresh. The image includes:
+That restarts Gluetun after each config refresh. The daemon then waits for the PIA gateway before requesting port forwarding.
+
+The long-running daemon runs with:
+
+```yaml
+network_mode: "service:gluetun"
+```
+
+That is required for PIA port forwarding because the PIA gateway endpoint, usually `10.100.0.1:19999`, is reachable only through the active VPN tunnel.
+
+The image includes:
 
 - `docker-cli`
 - `/usr/local/bin/restart-gluetun`
@@ -239,6 +261,13 @@ If Gluetun does not restart after refresh, check:
 1. `/var/run/docker.sock` is mounted into `pia-wg-daemon`.
 2. `GLUETUN_CONTAINER` matches the actual Gluetun container name.
 3. `restart-gluetun` is present in the daemon image.
+
+If `restart-gluetun` is not found, rebuild the image without cache and recreate the containers:
+
+```bash
+docker build --no-cache -t pia-wg-config-generator:local .
+docker compose up -d --force-recreate
+```
 
 You can test the helper manually:
 

@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"math/big"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,6 +27,8 @@ const (
 	defaultDaemonInterval   = 12 * time.Hour
 	defaultDaemonJitterMax  = 30 * time.Minute
 	defaultDaemonRetryDelay = 5 * time.Minute
+	defaultGatewayTimeout   = 2 * time.Minute
+	defaultGatewayInterval  = 5 * time.Second
 	defaultStatusFileName   = "status.json"
 	defaultConfigFileName   = "wg0.conf"
 	defaultForwardedPortOut = "forwarded_port"
@@ -487,6 +490,21 @@ func buildDaemonCommand() *cli.Command {
 				Usage: "How long to wait before retrying after a failed refresh",
 				Value: defaultDaemonRetryDelay,
 			},
+			&cli.BoolFlag{
+				Name:  "wait-for-gateway",
+				Usage: "Wait for the PIA port-forwarding gateway to be reachable before requesting a forwarded port",
+				Value: true,
+			},
+			&cli.DurationFlag{
+				Name:  "gateway-timeout",
+				Usage: "Maximum time to wait for the PIA port-forwarding gateway after a config refresh",
+				Value: defaultGatewayTimeout,
+			},
+			&cli.DurationFlag{
+				Name:  "gateway-check-interval",
+				Usage: "How often to check the PIA port-forwarding gateway while waiting",
+				Value: defaultGatewayInterval,
+			},
 			&cli.StringFlag{
 				Name:  "on-port-change",
 				Usage: "Hook command to run when the forwarded port changes. Use {port} placeholder.",
@@ -532,10 +550,13 @@ func runDaemon(c *cli.Context) error {
 	interval := c.Duration("refresh-interval")
 	jitterMax := c.Duration("refresh-jitter")
 	retryDelay := c.Duration("retry-delay")
+	waitForGatewayEnabled := c.Bool("wait-for-gateway")
+	gatewayTimeout := c.Duration("gateway-timeout")
+	gatewayInterval := c.Duration("gateway-check-interval")
 
 	if verbose {
-		log.Printf("Daemon Starting. region=%s stateDir=%s interval=%s retryDelay=%s ipv6Mode=%s",
-			region, stateDir, interval, retryDelay, c.String("ipv6-mode"))
+		log.Printf("Daemon Starting. region=%s stateDir=%s interval=%s retryDelay=%s waitForGateway=%t gatewayTimeout=%s ipv6Mode=%s",
+			region, stateDir, interval, retryDelay, waitForGatewayEnabled, gatewayTimeout, c.String("ipv6-mode"))
 	}
 
 	// Shared port-forwarding lease state — written by this goroutine,
@@ -585,17 +606,43 @@ func runDaemon(c *cli.Context) error {
 			continue
 		}
 
-		var currentPort string
+		currentPort := lastPort
 		var refreshErr error
 		var refreshErrStage string
-		if portForwarding {
+		if err := runConfigHook(configHookCmd, stateDir, configPath, forwardedPortPath, currentPort, verbose); err != nil {
+			refreshErr = err
+			refreshErrStage = "config hook failed"
+			status.LastError = err.Error()
+			lease.disable()
+			if verbose {
+				log.Printf("Config Hook Failed: %v", err)
+			}
+		}
+
+		if refreshErr == nil && portForwarding {
+			gateway, gatewayErr := gatewayFromKeyMeta(gen.Key)
+			if gatewayErr != nil {
+				refreshErr = gatewayErr
+				refreshErrStage = "port forwarding gateway missing"
+				status.LastError = gatewayErr.Error()
+				lease.disable()
+			} else if waitForGatewayEnabled {
+				if err := waitForGateway(gateway, gatewayTimeout, gatewayInterval, verbose); err != nil {
+					refreshErr = err
+					refreshErrStage = "port forwarding gateway wait failed"
+					status.LastError = err.Error()
+					lease.disable()
+				}
+			}
+		}
+
+		if refreshErr == nil && portForwarding {
 			portStr, sig, gw, pfErr := acquireAndBindPort(piaClient, gen.Key, verbose)
 			if pfErr != nil {
 				refreshErr = pfErr
 				refreshErrStage = "port forwarding failed"
 				status.LastError = pfErr.Error()
 				lease.disable()
-				_ = writeStatus(statusPath, status)
 			} else {
 
 				currentPort = portStr
@@ -605,7 +652,6 @@ func runDaemon(c *cli.Context) error {
 					refreshErr = err
 					refreshErrStage = "forwarded port write failed"
 					status.LastError = err.Error()
-					_ = writeStatus(statusPath, status)
 				} else {
 
 					if portStr != lastPort {
@@ -622,13 +668,6 @@ func runDaemon(c *cli.Context) error {
 		}
 
 		_ = writeStatus(statusPath, status)
-		if err := runConfigHook(configHookCmd, stateDir, configPath, forwardedPortPath, currentPort, verbose); err != nil {
-			status.LastError = err.Error()
-			_ = writeStatus(statusPath, status)
-			if verbose {
-				log.Printf("Config Hook Failed: %v", err)
-			}
-		}
 
 		if refreshErr != nil {
 			if verbose {
@@ -651,12 +690,9 @@ func runDaemon(c *cli.Context) error {
 // reusable signature, and the normalised gateway address.
 // Only ONE GetToken and ONE GetSignature call is made per config refresh.
 func acquireAndBindPort(piaClient *pia.PIAClient, keyMeta pia.AddKeyResult, verbose bool) (portStr string, sig pia.PFSignatureResponse, gateway string, err error) {
-	gateway = strings.TrimSpace(keyMeta.Gateway)
-	if gateway == "" {
-		gateway = strings.TrimSpace(keyMeta.ServerVip)
-	}
-	if gateway == "" {
-		return "", pia.PFSignatureResponse{}, "", errors.New("port forwarding enabled but no gateway/server_vip returned by API")
+	gateway, err = gatewayFromKeyMeta(keyMeta)
+	if err != nil {
+		return "", pia.PFSignatureResponse{}, "", err
 	}
 
 	token, err := piaClient.GetToken()
@@ -676,6 +712,59 @@ func acquireAndBindPort(piaClient *pia.PIAClient, keyMeta pia.AddKeyResult, verb
 	}
 
 	return strconv.Itoa(payload.Port), sig, gateway, nil
+}
+
+func gatewayFromKeyMeta(keyMeta pia.AddKeyResult) (string, error) {
+	gateway := strings.TrimSpace(keyMeta.Gateway)
+	if gateway == "" {
+		gateway = strings.TrimSpace(keyMeta.ServerVip)
+	}
+	if gateway == "" {
+		return "", errors.New("port forwarding enabled but no gateway/server_vip returned by API")
+	}
+	return gateway, nil
+}
+
+func waitForGateway(gateway string, timeout time.Duration, interval time.Duration, verbose bool) error {
+	address := pia.NormalizeGateway(gateway)
+	if address == "" {
+		return errors.New("port forwarding gateway is empty")
+	}
+
+	if interval <= 0 {
+		interval = defaultGatewayInterval
+	}
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+
+	for {
+		dialTimeout := minDuration(3*time.Second, interval)
+		conn, err := net.DialTimeout("tcp", address, dialTimeout)
+		if err == nil {
+			_ = conn.Close()
+			if verbose {
+				log.Printf("PIA gateway reachable: %s", address)
+			}
+			return nil
+		}
+		lastErr = err
+
+		if timeout <= 0 || !time.Now().Add(interval).Before(deadline) {
+			return fmt.Errorf("PIA port-forwarding gateway %s is not reachable through the active tunnel: %w", address, lastErr)
+		}
+
+		if verbose {
+			log.Printf("Waiting for PIA gateway %s: %v", address, lastErr)
+		}
+		time.Sleep(interval)
+	}
+}
+
+func minDuration(a time.Duration, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // startPFRenewLoop starts a background goroutine that calls BindPort every
