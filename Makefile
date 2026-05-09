@@ -7,6 +7,13 @@ GO          ?= go
 GOFLAGS     ?=
 PKG         := ./...
 BIN_NAME    := pia-wg-config
+LOCAL_GOCACHE ?= $(CURDIR)/.go-build-cache
+LOCAL_GOPATH  ?= $(CURDIR)/.go-path
+ifeq ($(OS),Windows_NT)
+GOENV      := set "GOCACHE=$(LOCAL_GOCACHE)" && set "GOPATH=$(LOCAL_GOPATH)" &&
+else
+GOENV      := GOCACHE="$(LOCAL_GOCACHE)" GOPATH="$(LOCAL_GOPATH)"
+endif
 
 # Pretty Colours
 GREEN  := \033[0;32m
@@ -46,7 +53,7 @@ help:
 .PHONY: build
 build:
 	@echo "$(GREEN)==> Building $(BIN_NAME)$(RESET)"
-	$(GO) build $(GOFLAGS) -o $(BIN_NAME) .
+	$(GOENV) $(GO) build $(GOFLAGS) -o $(BIN_NAME) .
 
 # ------------------------------------------------------------
 # Unit tests (offline, mocked)
@@ -54,25 +61,25 @@ build:
 .PHONY: test
 test:
 	@echo "$(GREEN)==> Running unit tests$(RESET)"
-	$(GO) test $(GOFLAGS) $(PKG)
+	$(GOENV) $(GO) test $(GOFLAGS) $(PKG)
 
 .PHONY: test-both
 test-both:
 	@echo "$(GREEN)==> Running unit tests$(RESET)"
-	$(GO) test $(GOFLAGS) $(PKG)
+	$(GOENV) $(GO) test $(GOFLAGS) $(PKG)
 	$(MAKE) test-integration
 
 .PHONY: test-all
 test-all:
 	@echo "$(GREEN)==> Running unit tests$(RESET)"
-	$(GO) test $(GOFLAGS) $(PKG)
+	$(GOENV) $(GO) test $(GOFLAGS) $(PKG)
 	$(MAKE) test-integration
 	$(MAKE) test-wireguard-client
 
 .PHONY: test-race
 test-race:
 	@echo "$(GREEN)==> Running unit tests (race detector)$(RESET)"
-	$(GO) test -race $(PKG)
+	$(GOENV) $(GO) test -race $(PKG)
 
 # ------------------------------------------------------------
 # Lint / vet
@@ -80,7 +87,7 @@ test-race:
 .PHONY: lint
 lint:
 	@echo "$(GREEN)==> Running go vet$(RESET)"
-	$(GO) vet $(PKG)
+	$(GOENV) $(GO) vet $(PKG)
 
 # ------------------------------------------------------------
 # Integration tests (real PIA API, env-gated)
@@ -88,7 +95,7 @@ lint:
 .PHONY: test-integration
 test-integration:
 	@echo "==> Running integration tests (skips if PIA_USERNAME and/or PIA_PASSWORD is not set)"
-	$(GO) test -tags=integration $(PKG)
+	$(GOENV) $(GO) test -tags=integration $(PKG)
 
 # ------------------------------------------------------------
 # System tests – Docker based
@@ -111,3 +118,4 @@ test-wireguard-client:
 clean:
 	@echo "$(GREEN)==> Cleaning build artefacts$(RESET)"
 	@rm -f $(BIN_NAME)
+	@rm -rf "$(LOCAL_GOCACHE)" "$(LOCAL_GOPATH)"
