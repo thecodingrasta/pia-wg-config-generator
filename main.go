@@ -561,7 +561,7 @@ func runDaemon(c *cli.Context) error {
 		if clientErr != nil {
 			status.LastError = clientErr.Error()
 			_ = writeStatus(statusPath, status)
-			sleepAfterFailure(retryDelay, verbose)
+			sleepAfterFailure("client setup failed", clientErr, retryDelay, verbose)
 			continue
 		}
 
@@ -574,47 +574,51 @@ func runDaemon(c *cli.Context) error {
 		if genErr != nil {
 			status.LastError = genErr.Error()
 			_ = writeStatus(statusPath, status)
-			sleepAfterFailure(retryDelay, verbose)
+			sleepAfterFailure("config generation failed", genErr, retryDelay, verbose)
 			continue
 		}
 
 		if err := atomicWriteFile(configPath, []byte(gen.Config), 0644); err != nil {
 			status.LastError = err.Error()
 			_ = writeStatus(statusPath, status)
-			sleepAfterFailure(retryDelay, verbose)
+			sleepAfterFailure("config write failed", err, retryDelay, verbose)
 			continue
 		}
 
 		var currentPort string
+		var refreshErr error
+		var refreshErrStage string
 		if portForwarding {
 			portStr, sig, gw, pfErr := acquireAndBindPort(piaClient, gen.Key, verbose)
 			if pfErr != nil {
+				refreshErr = pfErr
+				refreshErrStage = "port forwarding failed"
 				status.LastError = pfErr.Error()
 				lease.disable()
 				_ = writeStatus(statusPath, status)
-				sleepAfterFailure(retryDelay, verbose)
-				continue
+			} else {
+
+				currentPort = portStr
+				status.LastForwardPort = portStr
+
+				if err := atomicWriteFile(forwardedPortPath, []byte(portStr), 0644); err != nil {
+					refreshErr = err
+					refreshErrStage = "forwarded port write failed"
+					status.LastError = err.Error()
+					_ = writeStatus(statusPath, status)
+				} else {
+
+					if portStr != lastPort {
+						lastPort = portStr
+						_ = runHook(portHookCmd, portStr, verbose)
+					}
+
+					// Store the gateway + signature for the renew loop.
+					// The same signature is reused for every BindPort renewal — do NOT
+					// call GetSignature again until the next full config refresh.
+					lease.set(gw, sig, portStr)
+				}
 			}
-
-			currentPort = portStr
-			status.LastForwardPort = portStr
-
-			if err := atomicWriteFile(forwardedPortPath, []byte(portStr), 0644); err != nil {
-				status.LastError = err.Error()
-				_ = writeStatus(statusPath, status)
-				sleepAfterFailure(retryDelay, verbose)
-				continue
-			}
-
-			if portStr != lastPort {
-				lastPort = portStr
-				_ = runHook(portHookCmd, portStr, verbose)
-			}
-
-			// Store the gateway + signature for the renew loop.
-			// The same signature is reused for every BindPort renewal — do NOT
-			// call GetSignature again until the next full config refresh.
-			lease.set(gw, sig, portStr)
 		}
 
 		_ = writeStatus(statusPath, status)
@@ -624,6 +628,14 @@ func runDaemon(c *cli.Context) error {
 			if verbose {
 				log.Printf("Config Hook Failed: %v", err)
 			}
+		}
+
+		if refreshErr != nil {
+			if verbose {
+				log.Printf("Updated config at %s, but %s: %v", configPath, refreshErrStage, refreshErr)
+			}
+			sleepAfterFailure(refreshErrStage, refreshErr, retryDelay, verbose)
+			continue
 		}
 
 		if verbose {
@@ -714,12 +726,16 @@ func sleepUntil(t time.Time, verbose bool) {
 	time.Sleep(d)
 }
 
-func sleepAfterFailure(d time.Duration, verbose bool) {
+func sleepAfterFailure(stage string, err error, d time.Duration, verbose bool) {
 	if d <= 0 {
 		return
 	}
 	if verbose {
-		log.Printf("Refresh failed; retrying in %s", d.Round(time.Second))
+		if err != nil {
+			log.Printf("%s: %v; retrying in %s", stage, err, d.Round(time.Second))
+		} else {
+			log.Printf("%s; retrying in %s", stage, d.Round(time.Second))
+		}
 	}
 	time.Sleep(d)
 }

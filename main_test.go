@@ -119,7 +119,7 @@ func TestDaemonRetryDelayDefault(t *testing.T) {
 
 func TestSleepAfterFailure_ZeroReturnsImmediately(t *testing.T) {
 	start := time.Now()
-	sleepAfterFailure(0, false)
+	sleepAfterFailure("test failure", nil, 0, false)
 	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
 		t.Fatalf("expected zero retry delay to return immediately, took %s", elapsed)
 	}
