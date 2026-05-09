@@ -8,11 +8,6 @@ GOFLAGS     ?=
 PKG         := ./...
 BIN_NAME    := pia-wg-config
 
-# System test paths
-SYS_TEST_DIR        := test/system
-GLUETUN_DIR         := $(SYS_TEST_DIR)/gluetun
-WG_DIRECT_DIR       := $(SYS_TEST_DIR)/wireguard-direct
-
 # Pretty Colours
 GREEN  := \033[0;32m
 YELLOW := \033[0;33m
@@ -38,8 +33,9 @@ help:
 	@echo ""
 	@echo "  test-integration      Run integration tests (requires PIA creds)"
 	@echo ""
-	@echo "  test-system-gluetun   Full system test using Gluetun (Docker)"
-	@echo "  test-system-wg        Full system test using direct WireGuard"
+	@echo "  test-gluetun          Full system test using Gluetun (Docker)"
+	@echo "  test-gluetun-pf       Full system test using Gluetun + port forwarding"
+	@echo "  test-wireguard-client Full system test using a WireGuard client container"
 	@echo ""
 	@echo "  clean                 Remove build artefacts"
 	@echo ""
@@ -71,7 +67,7 @@ test-all:
 	@echo "$(GREEN)==> Running unit tests$(RESET)"
 	$(GO) test $(GOFLAGS) $(PKG)
 	$(MAKE) test-integration
-	$(MAKE) test-wgquick
+	$(MAKE) test-wireguard-client
 
 .PHONY: test-race
 test-race:
@@ -97,25 +93,16 @@ test-integration:
 # ------------------------------------------------------------
 # System tests – Docker based
 # ------------------------------------------------------------
-.PHONY: test-gluetun test-wgquick test-gluetun-pf test-wgquick-pf test-wgquick-ipv6-off test-wgquick-ipv6-kill
+.PHONY: test-gluetun test-wireguard-client test-gluetun-pf
 
 test-gluetun:
-	@./system-tests/verify.sh --dir ./system-tests/gluetun --ipv6 auto
-
-test-wgquick:
-	@./system-tests/verify.sh --dir ./system-tests/wg-quick --ipv6 auto
+	@cd system-tests/gluetun && docker compose up --build --abort-on-container-exit --exit-code-from tester
 
 test-gluetun-pf:
-	@./system-tests/verify.sh --dir ./system-tests/gluetun --pf --ipv6 auto
+	@cd system-tests/gluetun && PIA_PF=1 docker compose up --build --abort-on-container-exit --exit-code-from tester
 
-test-wgquick-pf:
-	@./system-tests/verify.sh --dir ./system-tests/wg-quick --pf --ipv6 auto
-
-test-wgquick-ipv6-off:
-	@./system-tests/verify.sh --dir ./system-tests/wg-quick --ipv6 off
-
-test-wgquick-ipv6-kill:
-	@./system-tests/verify.sh --dir ./system-tests/wg-quick --ipv6 kill
+test-wireguard-client:
+	@cd system-tests/wireguard-client && docker compose up --build --abort-on-container-exit --exit-code-from tester
 
 # ------------------------------------------------------------
 # Cleanup

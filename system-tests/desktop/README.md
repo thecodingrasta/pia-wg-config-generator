@@ -1,21 +1,37 @@
-# Desktop system checks
+# Desktop System Checks
 
 These checks validate that the generated `wg0.conf` is usable on real desktop clients.
 
 ## Linux (wg-quick)
-1. Generate:
-   `pia-wg-config generate -o wg0.conf -r uk_manchester USER PASS`
+1. Generate a config:
 
-2. Run verification script:
-   `sudo ./linux/verify.sh ./wg0.conf`
+   ```bash
+   pia-wg-config generate --username YOU --password SECRET --region uk_manchester --outfile wg0.conf
+   ```
+
+2. Run the verification script:
+
+   ```bash
+   sudo ./linux/verify.sh ./wg0.conf
+   ```
 
 ## Windows (WireGuard for Windows)
-1. Define the path to OpenSSL Curl, PIAs WAF blocks the Curl Windows ships with (Schannel)...
+1. If PIA rejects the inbox Windows curl, point `CURL_PATH` at an OpenSSL-linked curl binary:
 
-2. Generate:
-   `pia-wg-config generate -o wg0.conf -r uk_manchester USER PASS`
+   ```powershell
+   $env:CURL_PATH = "C:\tools\curl-openssl\curl.exe"
+   ```
+
+2. Generate a config:
+
+   ```powershell
+   .\pia-wg-config.exe generate --username YOU --password SECRET --region uk_manchester --outfile wg0.conf
+   ```
 
 3. Import `wg0.conf` into WireGuard for Windows and activate.
 
-4. Run:
-   `powershell -ExecutionPolicy Bypass -File .\windows\verify.ps1`
+4. Run the verification script:
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\windows\verify.ps1
+   ```

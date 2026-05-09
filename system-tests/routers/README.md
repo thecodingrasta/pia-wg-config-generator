@@ -1,4 +1,4 @@
-# Router validation
+# Router Validation
 
 While routers differ, they all consume the same core WireGuard fields.
 
@@ -19,5 +19,5 @@ The forwarded port should be used as the inbound listening port for any services
 
 ## Quick manual checks
 - Ensure the endpoint field uses the API-provided ServerIP:ServerPort
-- AllowedIPs is set to `0.0.0.0/0`
+- AllowedIPs is set to `0.0.0.0/0` for IPv4-only mode, or `0.0.0.0/0, ::/0` for dual-stack modes
 - Keepalive is set (25 seconds) to maintain NAT mapping

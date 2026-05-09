@@ -1,12 +1,12 @@
 # PIA-Wg-Config-Generator
 
-**A WireGuard config generator and sidecar daemon for Private Internet Access (PIA), built for Docker, Gluetun, routers and long-running tunnels.**
+**A WireGuard config generator and daemon for Private Internet Access (PIA), built for Docker, Gluetun, routers and long-running tunnels.**
 
 Private Internet Access does not provide static WireGuard configuration files through its user portal.
 
 Instead, WireGuard connections are created through an authenticated API flow that dynamically provisions the required connection details, including keys, server assignment, gateway and DNS information.
 
-This project automates that flow and makes PIA WireGuard practical for infrastructure-style setups such as Docker stacks, Gluetun sidecars, routers, firewalls and headless servers.
+This project automates that flow and makes PIA WireGuard practical for infrastructure-style setups such as Docker stacks, Gluetun, routers, firewalls and headless servers.
 
 ---
 
@@ -340,7 +340,7 @@ System tests require Docker:
 PIA_USERNAME=you PIA_PASSWORD=secret \
   docker compose -f system-tests/gluetun/docker-compose.yml \
   --env-file system-tests/gluetun/.env \
-  up --build --abort-on-container-exit
+  up --build --abort-on-container-exit --exit-code-from tester
 ```
 
 CI runs on GitHub Actions and covers:
@@ -386,20 +386,21 @@ Port-forwarding flow:
 
 ---
 
-## Project Direction
+## v1 Scope
 
 The goal is to keep this tool infrastructure-friendly without overcomplicating it.
 
-Planned/improving areas include:
+For v1, the supported surface is:
 
-- cleaner sidecar workflows,
-- stronger Gluetun integration patterns,
-- better router examples,
-- safer refresh/reload hooks,
-- improved status reporting,
-- and more resilient long-running daemon behaviour.
+- one-shot WireGuard config generation,
+- region listing and port-forwarding capable region filtering,
+- daemon refresh with retry behaviour,
+- Gluetun config refresh and restart integration,
+- rolling PIA port-forwarding renewal,
+- `forwarded_port` output for downstream applications,
+- and documented Docker, Gluetun, desktop and router workflows.
 
-The intention is for these features to stay opt-in and degrade gracefully if upstream tooling later adds native support.
+Future changes should preserve those workflows unless a replacement is demonstrably simpler and more reliable.
 
 ---
 

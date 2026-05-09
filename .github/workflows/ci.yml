@@ -133,9 +133,9 @@ jobs:
           PIA_PASSWORD: ${{ secrets.PIA_PASSWORD }}
           PIA_REGION:   ${{ secrets.PIA_REGION || 'ca_toronto' }}
           PIA_PF:       "0"
-          IPV6_MODE:    "auto"
+          IPV6_MODE:    "kill"
           TZ:           "UTC"
-          STATE_DIR:    "/state"
+          STATE_DIR:    "/gluetun/wireguard"
           WG_CONF_NAME: "wg0.conf"
           PF_PORT_FILE: "forwarded_port"
           IP_CHECK_URL: "https://api.ipify.org"
@@ -168,9 +168,9 @@ jobs:
           PIA_PASSWORD: ${{ secrets.PIA_PASSWORD }}
           PIA_REGION:   ${{ secrets.PIA_PF_REGION || 'ca_toronto' }}
           PIA_PF:       "1"
-          IPV6_MODE:    "auto"
+          IPV6_MODE:    "kill"
           TZ:           "UTC"
-          STATE_DIR:    "/state"
+          STATE_DIR:    "/gluetun/wireguard"
           WG_CONF_NAME: "wg0.conf"
           PF_PORT_FILE: "forwarded_port"
           IP_CHECK_URL: "https://api.ipify.org"
@@ -206,7 +206,7 @@ jobs:
           PIA_PASSWORD: ${{ secrets.PIA_PASSWORD }}
           PIA_REGION:   ${{ secrets.PIA_REGION || 'ca_toronto' }}
           PIA_PF:       "0"
-          IPV6_MODE:    "auto"
+          IPV6_MODE:    "kill"
           TZ:           "UTC"
           STATE_DIR:    "/state"
           WG_CONF_NAME: "wg0.conf"

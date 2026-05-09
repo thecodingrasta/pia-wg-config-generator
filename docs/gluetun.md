@@ -191,7 +191,7 @@ When port forwarding succeeds, the daemon writes:
 /gluetun/wireguard/forwarded_port
 ```
 
-Use that file from qBittorrent, scripts, or another sidecar if you need to update an application with the current port.
+Use that file from qBittorrent, scripts, or another helper container if you need to update an application with the current port.
 
 `--on-port-change` is separate from `--restart-container`. Use it only when another application needs to be told that the port changed:
 
@@ -251,6 +251,13 @@ If Gluetun does not restart after refresh, check:
 1. `/var/run/docker.sock` is mounted into `pia-wg-daemon`.
 2. `--restart-container` matches the actual Gluetun container name.
 3. The daemon image was rebuilt and the container was recreated after updating the binary.
+
+After rebuilding the image, recreate the daemon container:
+
+```bash
+docker build --no-cache -t pia-wg-config-generator:local .
+docker compose up -d --force-recreate pia-wg-daemon
+```
 
 If `forwarded_port` is missing, check:
 

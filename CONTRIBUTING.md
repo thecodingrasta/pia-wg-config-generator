@@ -73,7 +73,7 @@ cp system-tests/gluetun/.env.example system-tests/gluetun/.env
 
 docker compose -f system-tests/gluetun/docker-compose.yml \
   --env-file system-tests/gluetun/.env \
-  up --build --abort-on-container-exit
+  up --build --abort-on-container-exit --exit-code-from tester
 ```
 
 ---

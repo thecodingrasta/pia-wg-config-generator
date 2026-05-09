@@ -1,21 +1,31 @@
 services:
   pia-wg-daemon:
     build:
-      context: ../../..
+      context: ../..
       dockerfile: Dockerfile
     environment:
       - PIA_USERNAME=${PIA_USERNAME}
       - PIA_PASSWORD=${PIA_PASSWORD}
+      - PIA_REGION=${PIA_REGION}
+      - PIA_PF=${PIA_PF}
+      - IPV6_MODE=${IPV6_MODE}
+      - STATE_DIR=${STATE_DIR}
       - CURL_PATH=${CURL_PATH}
       - TZ=${TZ}
     entrypoint: ["/bin/sh","-lc"]
     command: >
-      'ARGS="daemon --verbose --state-dir=${STATE_DIR} --region=${PIA_REGION} --refresh-interval=30m --refresh-jitter=2m";
-      if [ "${PIA_PF}" = "1" ]; then ARGS="$ARGS --port-forwarding"; fi;
-      if [ -n "${IPV6_MODE}" ]; then ARGS="$ARGS --ipv6=${IPV6_MODE}"; fi;
-      exec pia-wg-config $ARGS'
+      'set -- daemon --verbose --state-dir="${STATE_DIR}" --region="${PIA_REGION}" --refresh-interval=30m --refresh-jitter=2m;
+      if [ "${PIA_PF}" = "1" ]; then set -- "$@" --port-forwarding; fi;
+      if [ -n "${IPV6_MODE}" ]; then set -- "$@" --ipv6-mode="${IPV6_MODE}"; fi;
+      exec pia-wg-config "$@"'
     volumes:
       - state:${STATE_DIR}
+    healthcheck:
+      test: ["CMD-SHELL", "test -s ${STATE_DIR}/${WG_CONF_NAME}"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 5s
     restart: "no"
 
   wgclient:
@@ -24,7 +34,8 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     depends_on:
-      - pia-wg-daemon
+      pia-wg-daemon:
+        condition: service_healthy
     volumes:
       - state:${STATE_DIR}:ro
       # linuxserver/wireguard expects /config/wg0.conf
