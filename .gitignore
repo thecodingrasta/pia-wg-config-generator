@@ -13,6 +13,13 @@
 .vscode/
 .env
 
+.go-build-cache/
+.go-path/
+.go-build-cache-ci/
+.go-path-ci/
+pia-wg-config-ci*
+pia-wg-config-*-ci*
+
 # Dependency directories (remove the comment below to include it)
 # vendor/
 .codex
