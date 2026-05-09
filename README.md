@@ -168,6 +168,7 @@ Daemon output files are written atomically to `--state-dir`:
 | `wg0.conf` | Generated WireGuard configuration |
 | `status.json` | Daemon status snapshot |
 | `forwarded_port` | Current forwarded port when port-forwarding is enabled |
+| `pending_port_forward.json` | Temporary metadata used across a Gluetun restart |
 
 ---
 
@@ -197,7 +198,8 @@ The important pieces are:
 1. Build the image locally and use it by tag in Compose.
 2. Seed the first `/gluetun/wireguard/wg0.conf` once if the file does not exist yet.
 3. Run the long-running daemon inside Gluetun's network namespace.
-4. The daemon refreshes `wg0.conf`, restarts Gluetun, waits for the PIA gateway, then renews/writes `forwarded_port`.
+4. The daemon refreshes `wg0.conf`, restarts Gluetun, exits, and is restarted by Docker into Gluetun's new network namespace.
+5. On the restarted daemon process, it waits for the PIA gateway, then renews/writes `forwarded_port`.
 
 Build the image once:
 
@@ -375,11 +377,12 @@ Port-forwarding flow:
 1. Authenticate and retrieve a token.
 2. Generate and write the refreshed WireGuard config.
 3. Restart Gluetun through Docker using `--restart-container`.
-4. Wait for the PIA gateway to be reachable through the active tunnel.
-5. Request a port-forwarding signature and bind the forwarded port.
-6. Renew the lease periodically.
-7. Write the active port to `forwarded_port`.
-8. Run `--on-port-change` if the port changes.
+4. Persist pending port-forwarding metadata and exit so Docker restarts the daemon into Gluetun's new network namespace.
+5. Wait for the PIA gateway to be reachable through the active tunnel.
+6. Request a port-forwarding signature and bind the forwarded port.
+7. Renew the lease periodically.
+8. Write the active port to `forwarded_port`.
+9. Run `--on-port-change` if the port changes.
 
 ---
 

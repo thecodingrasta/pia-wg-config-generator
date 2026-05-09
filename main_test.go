@@ -6,10 +6,14 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/thecodingrasta/pia-wg-config-generator/pia"
 	cli "github.com/urfave/cli/v2"
 )
 
@@ -216,5 +220,46 @@ func TestRestartDockerContainerWithClient_ReturnsDockerErrorBody(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "No such container") {
 		t.Fatalf("expected docker error body, got: %v", err)
+	}
+}
+
+func TestPendingPortForwardRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), defaultPendingPFName)
+	key := pia.AddKeyResult{
+		Gateway:   "10.175.0.1",
+		ServerVip: "10.175.0.1",
+		PeerIP:    "10.0.0.2",
+	}
+
+	if err := writePendingPortForward(path, key); err != nil {
+		t.Fatalf("write pending: %v", err)
+	}
+
+	pending, ok, err := readPendingPortForward(path)
+	if err != nil {
+		t.Fatalf("read pending: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected pending state")
+	}
+	if pending.Key.Gateway != key.Gateway || pending.Key.PeerIP != key.PeerIP {
+		t.Fatalf("unexpected pending key: %+v", pending.Key)
+	}
+
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat pending: %v", err)
+		}
+		if info.Mode().Perm() != 0600 {
+			t.Fatalf("expected pending file mode 0600, got %v", info.Mode().Perm())
+		}
+	}
+
+	if err := removePendingPortForward(path); err != nil {
+		t.Fatalf("remove pending: %v", err)
+	}
+	if _, ok, err := readPendingPortForward(path); err != nil || ok {
+		t.Fatalf("expected pending state to be absent, ok=%t err=%v", ok, err)
 	}
 }

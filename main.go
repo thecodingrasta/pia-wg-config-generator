@@ -36,6 +36,7 @@ const (
 	defaultStatusFileName   = "status.json"
 	defaultConfigFileName   = "wg0.conf"
 	defaultForwardedPortOut = "forwarded_port"
+	defaultPendingPFName    = "pending_port_forward.json"
 
 	// PIA requires BindPort roughly every 15 minutes. We renew at 14m to be safe.
 	defaultPFRenewInterval = 14 * time.Minute
@@ -523,6 +524,11 @@ type daemonStatus struct {
 	IPv6Mode          string    `json:"ipv6_mode"`
 }
 
+type pendingPortForward struct {
+	CreatedUTC time.Time        `json:"created_utc"`
+	Key        pia.AddKeyResult `json:"key"`
+}
+
 func buildDaemonCommand() *cli.Command {
 	return &cli.Command{
 		Name:  "daemon",
@@ -635,6 +641,7 @@ func runDaemon(c *cli.Context) error {
 	configPath := mustStatePath(stateDir, defaultConfigFileName)
 	statusPath := mustStatePath(stateDir, defaultStatusFileName)
 	forwardedPortPath := mustStatePath(stateDir, defaultForwardedPortOut)
+	pendingPFPath := mustStatePath(stateDir, defaultPendingPFName)
 
 	interval := c.Duration("refresh-interval")
 	jitterMax := c.Duration("refresh-jitter")
@@ -675,6 +682,60 @@ func runDaemon(c *cli.Context) error {
 			continue
 		}
 
+		if portForwarding {
+			pending, hasPending, pendingErr := readPendingPortForward(pendingPFPath)
+			if pendingErr != nil {
+				status.LastError = pendingErr.Error()
+				_ = writeStatus(statusPath, status)
+				sleepAfterFailure("pending port forwarding state read failed", pendingErr, retryDelay, verbose)
+				continue
+			}
+
+			if hasPending {
+				if verbose {
+					log.Printf("Using pending port-forwarding metadata from %s", pendingPFPath)
+				}
+
+				portStr, sig, gw, pfErr := acquirePortForwardAfterGatewayWait(
+					piaClient,
+					pending.Key,
+					waitForGatewayEnabled,
+					gatewayTimeout,
+					gatewayInterval,
+					verbose,
+				)
+				if pfErr != nil {
+					status.LastError = pfErr.Error()
+					lease.disable()
+					_ = writeStatus(statusPath, status)
+					sleepAfterFailure("pending port forwarding failed", pfErr, retryDelay, verbose)
+					continue
+				}
+
+				status.LastForwardPort = portStr
+				if err := atomicWriteFile(forwardedPortPath, []byte(portStr), 0644); err != nil {
+					status.LastError = err.Error()
+					_ = writeStatus(statusPath, status)
+					sleepAfterFailure("forwarded port write failed", err, retryDelay, verbose)
+					continue
+				}
+
+				if portStr != lastPort {
+					lastPort = portStr
+					_ = runHook(portHookCmd, portStr, verbose)
+				}
+				lease.set(gw, sig, portStr)
+				_ = removePendingPortForward(pendingPFPath)
+				_ = writeStatus(statusPath, status)
+
+				if verbose {
+					log.Printf("Port forwarding active after Gluetun restart (port=%s)", portStr)
+				}
+				sleepUntil(next, verbose)
+				continue
+			}
+		}
+
 		wgConfigGenerator := pia.NewPIAWgGenerator(
 			piaClient,
 			pia.PIAWgGeneratorConfig{Verbose: verbose, ServerName: serverName, IPv6Mode: ipv6Mode},
@@ -698,13 +759,35 @@ func runDaemon(c *cli.Context) error {
 		currentPort := lastPort
 		var refreshErr error
 		var refreshErrStage string
-		if err := runConfigChangeActions(configHookCmd, restartContainer, dockerSocket, stateDir, configPath, forwardedPortPath, currentPort, verbose); err != nil {
+		if err := runConfigHook(configHookCmd, stateDir, configPath, forwardedPortPath, currentPort, verbose); err != nil {
 			refreshErr = err
-			refreshErrStage = "config change action failed"
+			refreshErrStage = "config hook failed"
 			status.LastError = err.Error()
 			lease.disable()
 			if verbose {
-				log.Printf("Config Change Action Failed: %v", err)
+				log.Printf("Config Hook Failed: %v", err)
+			}
+		}
+
+		if refreshErr == nil && restartContainer != "" {
+			if err := restartDockerContainer(dockerSocket, restartContainer, verbose); err != nil {
+				refreshErr = err
+				refreshErrStage = "container restart failed"
+				status.LastError = err.Error()
+				lease.disable()
+			} else if portForwarding {
+				if err := writePendingPortForward(pendingPFPath, gen.Key); err != nil {
+					refreshErr = err
+					refreshErrStage = "pending port forwarding state write failed"
+					status.LastError = err.Error()
+					lease.disable()
+				} else {
+					_ = writeStatus(statusPath, status)
+					if verbose {
+						log.Printf("Gluetun restarted; exiting so the daemon rejoins the new network namespace")
+					}
+					return nil
+				}
 			}
 		}
 
@@ -803,6 +886,21 @@ func acquireAndBindPort(piaClient *pia.PIAClient, keyMeta pia.AddKeyResult, verb
 	return strconv.Itoa(payload.Port), sig, gateway, nil
 }
 
+func acquirePortForwardAfterGatewayWait(piaClient *pia.PIAClient, keyMeta pia.AddKeyResult, waitEnabled bool, timeout time.Duration, interval time.Duration, verbose bool) (portStr string, sig pia.PFSignatureResponse, gateway string, err error) {
+	gateway, err = gatewayFromKeyMeta(keyMeta)
+	if err != nil {
+		return "", pia.PFSignatureResponse{}, "", err
+	}
+
+	if waitEnabled {
+		if err := waitForGateway(gateway, timeout, interval, verbose); err != nil {
+			return "", pia.PFSignatureResponse{}, "", err
+		}
+	}
+
+	return acquireAndBindPort(piaClient, keyMeta, verbose)
+}
+
 func gatewayFromKeyMeta(keyMeta pia.AddKeyResult) (string, error) {
 	gateway := strings.TrimSpace(keyMeta.Gateway)
 	if gateway == "" {
@@ -891,6 +989,40 @@ func writeStatus(path string, status daemonStatus) error {
 		return err
 	}
 	return atomicWriteFile(path, data, 0644)
+}
+
+func writePendingPortForward(path string, key pia.AddKeyResult) error {
+	data, err := json.MarshalIndent(pendingPortForward{
+		CreatedUTC: time.Now().UTC(),
+		Key:        key,
+	}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWriteFile(path, data, 0600)
+}
+
+func readPendingPortForward(path string) (pendingPortForward, bool, error) {
+	var pending pendingPortForward
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return pending, false, nil
+		}
+		return pending, false, err
+	}
+	if err := json.Unmarshal(data, &pending); err != nil {
+		return pending, false, err
+	}
+	return pending, true, nil
+}
+
+func removePendingPortForward(path string) error {
+	err := os.Remove(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 func sleepUntil(t time.Time, verbose bool) {

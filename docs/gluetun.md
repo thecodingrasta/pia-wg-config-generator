@@ -8,7 +8,8 @@ The simple version:
 2. Generate the first `wg0.conf` once if this is a fresh install.
 3. Start Gluetun from that config.
 4. Run the long-running daemon inside Gluetun's network namespace.
-5. On every refresh, the daemon writes `wg0.conf`, restarts Gluetun, waits for the PIA gateway, then writes/renews `forwarded_port`.
+5. On every refresh, the daemon writes `wg0.conf`, restarts Gluetun, exits, and is restarted by Docker into Gluetun's new network namespace.
+6. The restarted daemon waits for the PIA gateway, then writes/renews `forwarded_port`.
 
 ## 1. Build the Image
 
@@ -53,7 +54,8 @@ Startup order after seeding:
 1. Gluetun starts from the existing `wg0.conf`.
 2. Gluetun passes its healthcheck.
 3. `pia-wg-daemon` starts because it depends on `gluetun: service_healthy`.
-4. On future refreshes, the daemon writes a new config, restarts Gluetun, waits for the PIA gateway, then updates `forwarded_port`.
+4. On future refreshes, the daemon writes a new config, restarts Gluetun, exits, and is restarted by Docker into Gluetun's new network namespace.
+5. The restarted daemon uses the pending metadata to update `forwarded_port` without generating another config first.
 
 ## 4. Compose File
 
@@ -127,6 +129,7 @@ With `--state-dir=/gluetun/wireguard`, the daemon writes:
 | `/gluetun/wireguard/wg0.conf` | WireGuard config consumed by Gluetun |
 | `/gluetun/wireguard/status.json` | Last daemon status and errors |
 | `/gluetun/wireguard/forwarded_port` | Current forwarded port, when port forwarding is enabled |
+| `/gluetun/wireguard/pending_port_forward.json` | Temporary metadata used across a Gluetun restart |
 
 On the host, these are under:
 
@@ -152,21 +155,22 @@ Use:
 --restart-container=gluetun
 ```
 
-That restarts Gluetun after each config refresh through Docker's API. The daemon then waits for the PIA gateway before requesting port forwarding.
+That restarts Gluetun after each config refresh through Docker's API.
 
-The long-running daemon runs with:
+Because the daemon uses:
 
 ```yaml
 network_mode: "service:gluetun"
 ```
 
-That is required for PIA port forwarding because the PIA gateway endpoint, usually `10.100.0.1:19999`, is reachable only through the active VPN tunnel.
+it must exit after restarting Gluetun. Docker then restarts the daemon into Gluetun's new network namespace. That is required for PIA port forwarding because the PIA gateway endpoint, usually `10.100.0.1:19999`, is reachable only through the active VPN tunnel.
 
 For this to work, the daemon needs:
 
 ```yaml
 volumes:
   - /var/run/docker.sock:/var/run/docker.sock:ro
+restart: unless-stopped
 ```
 
 If your Gluetun container has a different name, set `--restart-container` to that exact container name.
