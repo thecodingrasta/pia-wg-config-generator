@@ -17,6 +17,7 @@
 .go-path/
 .go-build-cache-ci/
 .go-path-ci/
+system-tests/.ci-state/
 pia-wg-config-ci*
 pia-wg-config-*-ci*
 
