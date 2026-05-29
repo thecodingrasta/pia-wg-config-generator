@@ -1,0 +1,53 @@
+name: Documentation
+description: Report unclear, missing, outdated, or incorrect documentation.
+title: "[Docs]: "
+labels:
+  - documentation
+body:
+  - type: dropdown
+    id: doc_type
+    attributes:
+      label: Documentation issue type
+      options:
+        - Missing documentation
+        - Unclear documentation
+        - Incorrect documentation
+        - Outdated documentation
+        - Typo / formatting
+        - Example does not work
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: location
+    attributes:
+      label: Documentation location
+      description: Link to the page/file/section if possible.
+      placeholder: "README.md, docs/gluetun.md, system-tests/routers/README.md, etc."
+    validations:
+      required: false
+
+  - type: textarea
+    id: issue
+    attributes:
+      label: What is wrong or missing?
+      placeholder: "Describe the documentation problem."
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggested
+    attributes:
+      label: Suggested improvement
+      placeholder: "What should the docs say instead?"
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      placeholder: "What were you trying to do when the docs became confusing?"
+    validations:
+      required: false

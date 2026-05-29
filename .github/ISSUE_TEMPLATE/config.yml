@@ -1,0 +1,18 @@
+blank_issues_enabled: false
+
+contact_links:
+  - name: Setup help / general questions
+    url: https://github.com/thecodingrasta/pia-wg-config-generator/discussions/categories/setup-help
+    about: Ask for help with setup, Docker, Gluetun, routers, or general usage.
+
+  - name: Feature ideas
+    url: https://github.com/thecodingrasta/pia-wg-config-generator/discussions/categories/ideas
+    about: Suggest or discuss larger ideas before they become issues.
+
+  - name: Show and tell
+    url: https://github.com/thecodingrasta/pia-wg-config-generator/discussions/categories/show-and-tell
+    about: Share your working setup, router notes, Compose files, scripts, or integrations.
+
+  - name: Security vulnerability
+    url: https://github.com/thecodingrasta/pia-wg-config-generator/security/policy
+    about: Please report security issues privately through the repository security policy.

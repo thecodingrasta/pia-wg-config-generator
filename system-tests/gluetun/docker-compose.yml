@@ -88,8 +88,8 @@ services:
 
   tester:
     build:
-      context: ../common/tester
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: common/tester/Dockerfile
     depends_on:
       pia-wg-daemon:
         condition: service_healthy
