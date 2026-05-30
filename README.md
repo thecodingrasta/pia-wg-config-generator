@@ -512,7 +512,7 @@ Integration tests require real PIA credentials:
 PIA_USERNAME=whoDis PIA_PASSWORD=superDuperSecretPassword
 ```
 
-System tests require Docker:
+Live system tests require Docker and real PIA credentials:
 
 ```bash
 PIA_USERNAME=you \
@@ -528,8 +528,10 @@ CI runs on GitHub Actions and covers:
 * unit tests on Linux, macOS and Windows,
 * Linux race detector,
 * binary build artefacts,
-* integration tests when PIA secrets are configured,
-* system tests when PIA secrets are configured.
+* integration tests, which skip safely when credentials are not present,
+* Docker smoke tests for the Gluetun, Gluetun port-forwarding and WireGuard-client test harnesses without real PIA credentials.
+
+Live PIA Docker tests are intended for local/manual validation because public CI must not depend on private VPN account credentials.
 
 ---
 
