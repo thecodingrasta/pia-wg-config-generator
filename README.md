@@ -18,6 +18,37 @@
 
 ---
 
+<details>
+<summary><strong>Table of contents</strong></summary>
+
+* [What This Does](#what-this-does)
+* [Why This Exists](#why-this-exists)
+* [Features](#features)
+* [Common Use Cases](#common-use-cases)
+* [Quick Start](#quick-start)
+  * [Before You Begin](#before-you-begin)
+  * [1. Download the Binary](#1-download-the-binary)
+  * [2. Make It Runnable](#2-make-it-runnable)
+  * [3. Generate Your First Config](#3-generate-your-first-config)
+  * [4. Use Your Config](#4-use-your-config)
+* [Other Ways to Install](#other-ways-to-install)
+* [Example: `wg-quick`](#example-wg-quick)
+* [Commands](#commands)
+* [IPv6 Modes](#ipv6-modes)
+* [Docker / Gluetun](#docker--gluetun)
+* [Routers and Firewalls](#routers-and-firewalls)
+* [Windows Notes](#windows-notes)
+* [Output Files](#output-files)
+* [Security Notes](#security-notes)
+* [Testing](#testing)
+* [Architecture](#architecture)
+* [Roadmap](#roadmap)
+* [Contributing](#contributing)
+
+</details>
+
+---
+
 ## What This Does
 
 Private Internet Access (PIA) doesn't provide permanent, static WireGuard configuration files through its user portal.
@@ -106,19 +137,126 @@ That is awkward for:
 
 ## Quick Start
 
+New here? This is the path for you. You download one file, make it runnable, and generate a config. No Go toolchain, no compiler, no Docker required.
+
+> [!TIP]
+> If you are comfortable with Go or want a macOS build, skip to [Other Ways to Install](#other-ways-to-install).
+
+### Before You Begin
+
+You need:
+
+* **A Private Internet Access account** — the same username and password you use to log into PIA. This tool logs into PIA's API on your behalf; it does not work without a paid PIA subscription.
+* **Somewhere to use a WireGuard config** — the WireGuard app on your computer or phone, a router that supports WireGuard, or Docker/Gluetun. If you just want a VPN on your desktop, install the official [WireGuard app](https://www.wireguard.com/install/) first.
+
+That's it. You do **not** need to install Go or build anything.
+
+### 1. Download the Binary
+
+Go to the [**Releases page**](https://github.com/thecodingrasta/pia-wg-config-generator/releases/latest) and download the file that matches your system:
+
+| Your system                     | File to download          |
+| ------------------------------- | ------------------------- |
+| Linux (64-bit Intel/AMD)        | `pia-wg-config`           |
+| Windows (64-bit Intel/AMD)      | `pia-wg-config.exe`       |
+| Windows (ARM64)                 | `pia-wg-config-arm64.exe` |
+
+> [!NOTE]
+> **macOS and Linux ARM (Raspberry Pi, etc.)** don't have a prebuilt binary yet. The code is fully cross-platform, so the easiest path is [Install With Go](#install-with-go) below — it compiles a native binary for your machine in one command. macOS is a fully supported build target.
+
+Most people want the "Assets" section of the **latest** release. Ignore the `Source code (zip / tar.gz)` links unless you specifically want to build from source.
+
+### 2. Make It Runnable
+
+**Linux**
+
+Open a terminal in the folder where you downloaded the file, then mark it executable:
+
+```bash
+chmod +x ./pia-wg-config
+```
+
+You can now run it as `./pia-wg-config`. To run it from anywhere, move it onto your `PATH`:
+
+```bash
+sudo mv ./pia-wg-config /usr/local/bin/pia-wg-config
+```
+
+**Windows**
+
+No extra step is needed — just open **PowerShell** in the folder where you downloaded the file and run `.\pia-wg-config.exe`. Windows may warn that the file is from the internet the first time; choose **Run anyway**.
+
+Verify it works:
+
+```bash
+./pia-wg-config --help
+```
+
+If you see the list of commands, you're ready. (On Windows, use `.\pia-wg-config.exe --help`.)
+
+### 3. Generate Your First Config
+
+First, pick a region. List everything PIA offers with:
+
+```bash
+./pia-wg-config regions --username "YOUR_PIA_USERNAME" --password "YOUR_PIA_PASSWORD"
+```
+
+That prints region IDs like `uk_southampton`, `us_california`, `nl_amsterdam`. Pick one and generate a config:
+
+```bash
+./pia-wg-config generate \
+  --username "YOUR_PIA_USERNAME" \
+  --password "YOUR_PIA_PASSWORD" \
+  --region "uk_southampton" \
+  --outfile wg0.conf
+```
+
+Prefer not to put your password in the command line? Use environment variables instead:
+
+```bash
+export PIA_USERNAME="YOUR_PIA_USERNAME"
+export PIA_PASSWORD="YOUR_PIA_PASSWORD"
+
+./pia-wg-config generate --region "uk_southampton" --outfile wg0.conf
+```
+
+You now have a `wg0.conf` file in the current folder.
+
+> [!TIP]
+> On Windows PowerShell, set environment variables with `$env:PIA_USERNAME="..."` and `$env:PIA_PASSWORD="..."`.
+
+### 4. Use Your Config
+
+**On a desktop or phone (simplest):** open the [WireGuard app](https://www.wireguard.com/install/), choose **Add tunnel → Import from file**, and select your `wg0.conf`. Toggle it on — you're connected.
+
+**On Linux with `wg-quick`:** see [Example: `wg-quick`](#example-wg-quick) below.
+
+**On a router or firewall:** see [Routers and Firewalls](#routers-and-firewalls).
+
+**With Docker / Gluetun (long-running gateway):** see [Docker / Gluetun](#docker--gluetun).
+
+---
+
+## Other Ways to Install
+
+These are for developers, macOS users, and unsupported architectures. If you already downloaded a binary above, you can skip this section.
+
 ### Install With Go
+
+Requires [Go](https://go.dev/dl/) 1.21 or newer. This compiles a native binary for **your** machine, including macOS and Linux ARM:
 
 ```bash
 go install github.com/thecodingrasta/pia-wg-config-generator@latest
 ```
 
-Make sure your Go bin directory is available on your `PATH`.
-
-For example:
+Make sure your Go bin directory is on your `PATH`:
 
 ```bash
 export PATH="$PATH:$(go env GOPATH)/bin"
 ```
+
+You can then run `pia-wg-config` from anywhere.
 
 ### Build From Source
 
@@ -128,31 +266,17 @@ cd pia-wg-config-generator
 make build
 ```
 
-### Generate a WireGuard Config
+This produces a `pia-wg-config` binary in the project directory. All dependencies are vendored, so no network access is needed for the build itself.
+
+### Run With Docker
+
+The published image bundles the binary and its runtime dependencies:
 
 ```bash
-pia-wg-config generate \
-  --username "YOUR_PIA_USERNAME" \
-  --password "YOUR_PIA_PASSWORD" \
-  --region "uk_southampton" \
-  --outfile wg0.conf
+docker build -t pia-wg-config-generator:local .
 ```
 
-Or using environment variables:
-
-```bash
-PIA_USERNAME="YOUR_PIA_USERNAME" \
-PIA_PASSWORD="YOUR_PIA_PASSWORD" \
-pia-wg-config generate --region "uk_southampton" --outfile wg0.conf
-```
-
-The generated `wg0.conf` can be used with:
-
-* `wg-quick`,
-* WireGuard desktop/mobile clients,
-* routers and firewalls that support WireGuard,
-* Docker VPN gateways,
-* Gluetun custom WireGuard mode.
+See [Docker / Gluetun](#docker--gluetun) for the full container workflow.
 
 ---
 
@@ -577,9 +701,9 @@ When daemon mode and port forwarding are enabled:
 
 ## Roadmap
 
-The v1 goal is to stay infrastructure-friendly without overcomplicating the project.
+The goal for the v1 release is to stay infrastructure-friendly without overcomplicating the project.
 
-Planned or potential improvements:
+Planned or potential improvements in the future:
 
 * Prebuilt release binaries for more platforms.
 * Published container image via GHCR.
