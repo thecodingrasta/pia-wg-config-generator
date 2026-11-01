@@ -307,7 +307,13 @@ These are for developers, macOS users, and unsupported architectures. If you alr
 Requires [Go](https://go.dev/dl/) 1.26 or newer. This compiles a native binary for **your** machine, including macOS and Linux ARM:
 
 ```bash
-go install github.com/thecodingrasta/pia-wg-config-generator@latest
+chmod +x ./pia-wg-config
+```
+
+You can now run it as `./pia-wg-config`. To run it from anywhere, move it onto your `PATH`:
+
+```bash
+sudo mv ./pia-wg-config /usr/local/bin/pia-wg-config
 ```
 
 Make sure your Go bin directory is on your `PATH`:
@@ -322,7 +328,7 @@ You can then run `pia-wg-config` from anywhere.
 Make sure your Go bin directory is on your `PATH`:
 
 ```bash
-export PATH="$PATH:$(go env GOPATH)/bin"
+./pia-wg-config --help
 ```
 
 You can then run `pia-wg-config` from anywhere.
@@ -1176,7 +1182,6 @@ each refresh:
 ## Roadmap
 ## Roadmap
 
-The goal for the v1 release is to stay infrastructure-friendly without overcomplicating the project.
 The goal for the v1 release is to stay infrastructure-friendly without overcomplicating the project.
 
 Planned or potential improvements in the future:
