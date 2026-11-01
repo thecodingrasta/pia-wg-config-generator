@@ -1,0 +1,84 @@
+# =============================================================================
+# pia-wg-refresh-proxy.cfg.template
+#
+# A deliberately tiny HAProxy configuration for the Docker-socket proxy that
+# fronts pia-wg-refresh. It replaces the image's stock template (which is built
+# around coarse per-section switches) and allows EXACTLY ONE API call:
+#
+#     POST /containers/<PIA_WG_RESTART_TARGET>/restart
+#
+# Everything else - listing or inspecting containers, exec, create, start,
+# stop, kill, images, volumes, networks, events, info, ping, version, any other
+# container name, any other method - is answered 403.
+#
+# Why not the stock switches (CONTAINERS=1 POST=1)? Measured against this very
+# image: that pair also allows POST /containers/create and exec creation, which
+# is root-equivalent on the host. Even the narrower ALLOW_RESTARTS=1 permits
+# stop/kill/restart of EVERY container. This file pins it to one container.
+#
+# The image entrypoint substitutes ${BIND_CONFIG} with sed; HAProxy itself
+# expands the remaining "${VAR}" words from the container environment.
+# =============================================================================
+global
+    log stdout format raw daemon "${LOG_LEVEL}"
+    pidfile /run/haproxy.pid
+    maxconn 50
+
+    # Running as root is intentional, so say so. Without this, HAProxy 3.x logs
+    # "[WARNING] HAProxy was started as the root user and does not make use of
+    # 'user' nor 'uid' global options to drop the privileges" on every start.
+    #
+    # Why not drop to an unprivileged user or chroot, as that warning suggests?
+    #   - The Docker socket is root-owned (srw-rw---- root:root on Docker
+    #     Desktop, root:docker on most Linux hosts), so the process must be able
+    #     to open it. The right group id differs per host and cannot be baked
+    #     into a portable template.
+    #   - The compose file runs this container with `cap_drop: ALL`, which also
+    #     removes CAP_SETUID/CAP_SETGID (needed by `user`/`group`) and
+    #     CAP_SYS_CHROOT (needed by `chroot`). Those directives would stop
+    #     HAProxy from starting.
+    #   - A chroot would also hide the backend socket path below.
+    #
+    # The compensating controls are in the compose service, not here: zero
+    # capabilities, a read-only root filesystem, no-new-privileges, an internal
+    # network shared only with pia-wg-refresh, and the single-call ACL below.
+    uid 0
+
+defaults
+    mode http
+    log global
+    option httplog
+    option dontlognull
+    option http-server-close
+    retries 1
+    timeout http-request 10s
+    timeout connect 5s
+    timeout client 30s
+    timeout server 40s
+    timeout http-keep-alive 5s
+    maxconn 50
+
+    errorfile 400 /usr/local/etc/haproxy/errors/400.http
+    errorfile 403 /usr/local/etc/haproxy/errors/403.http
+    errorfile 408 /usr/local/etc/haproxy/errors/408.http
+    errorfile 500 /usr/local/etc/haproxy/errors/500.http
+    errorfile 502 /usr/local/etc/haproxy/errors/502.http
+    errorfile 503 /usr/local/etc/haproxy/errors/503.http
+    errorfile 504 /usr/local/etc/haproxy/errors/504.http
+
+backend dockerbackend
+    server dockersocket "${SOCKET_PATH}"
+
+frontend dockerfrontend
+    bind ${BIND_CONFIG}
+
+    # The one permitted call. The path is compared as an exact, case-sensitive
+    # string after URL-decoding, so encoded or dot-segment tricks cannot widen
+    # it, and the query string (?t=10) is not part of the path.
+    acl is_post method POST
+    acl is_the_restart path,url_dec -m str "/containers/${PIA_WG_RESTART_TARGET}/restart"
+
+    http-request allow if is_post is_the_restart
+    http-request deny
+
+    default_backend dockerbackend

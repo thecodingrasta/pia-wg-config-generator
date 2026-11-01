@@ -1,6 +1,6 @@
 module github.com/thecodingrasta/pia-wg-config-generator
 
-go 1.21
+go 1.26
 
 require (
 	github.com/benburkert/dns v0.0.0-20190225204957-d356cf78cdfc

@@ -224,7 +224,7 @@ func parseTokenFromCurlOutput(body []byte) (string, error) {
 	var decoded tokenJSON
 	if err := json.Unmarshal([]byte(trim), &decoded); err != nil {
 		// If it’s not JSON, treat as denial but keep the error for debugging.
-		return "", fmt.Errorf("%w: invalid JSON (%v)", ErrTokenDenied, err)
+		return "", fmt.Errorf("%w: invalid JSON (%w)", ErrTokenDenied, err)
 	}
 
 	token := strings.TrimSpace(decoded.Token)

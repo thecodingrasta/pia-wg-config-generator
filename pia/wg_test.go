@@ -208,7 +208,7 @@ func TestPIAWgGenerator_IPv6Mode_Kill_ProducesRulesAndDualStack(t *testing.T) {
 	if interfaceIdx < 0 || peerIdx < 0 || postUpIdx < 0 {
 		t.Fatalf("IPv6ModeKill: missing expected sections, got:\n%s", got)
 	}
-	if !(interfaceIdx < postUpIdx && postUpIdx < peerIdx) {
+	if interfaceIdx >= postUpIdx || postUpIdx >= peerIdx {
 		t.Fatalf("IPv6ModeKill: PostUp must appear inside [Interface], before [Peer], got:\n%s", got)
 	}
 }

@@ -1,0 +1,160 @@
+# =============================================================================
+# pia-wg-config-generator: self-recovering PIA WireGuard gateway for Gluetun
+#
+# Four containers, three images:
+#
+#   gluetun               qmcgaw/gluetun         the VPN client; the only service
+#                                                that talks WireGuard
+#   pia-wg-refresh-proxy  tecnativa/docker-      lets pia-wg-refresh restart ONE
+#                         socket-proxy           container, and nothing else
+#   pia-wg-refresh        this project's image   keeps wg0.conf valid; on the
+#                                                LAN so it works with the tunnel down
+#   pia-wg-pf             this project's image   holds the port-forward lease;
+#                                                inside Gluetun's network namespace
+#
+# Read docs/gluetun.md for the reasoning behind each service. Gluetun will not
+# start without a wg0.conf, so seed the first one BEFORE `docker compose up`
+# (the exact command is in docs/gluetun.md, "2. Seed the First Config").
+#
+# Run from this directory:   cp .env.example .env && docker compose up -d
+# =============================================================================
+
+x-pia-wg-image: &pia-wg-image ${PIA_WG_IMAGE:-ghcr.io/thecodingrasta/pia-wg-config-generator:latest}
+
+services:
+  # ---------------------------------------------------------------------------
+  # 1. The VPN client. Starts from the wg0.conf that pia-wg-refresh maintains.
+  #    Its built-in Docker healthcheck is deliberately NOT overridden: it
+  #    reports Gluetun's own verdict, and pia-wg-pf waits on it.
+  # ---------------------------------------------------------------------------
+  gluetun:
+    image: qmcgaw/gluetun:latest # pin a version (or digest) in real use
+    container_name: gluetun
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      TZ: ${TZ:-UTC}
+      VPN_SERVICE_PROVIDER: custom
+      VPN_TYPE: wireguard
+      UPDATER_PERIOD: "0"
+    volumes:
+      - ./config/gluetun:/gluetun
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # 2. Restart-only Docker proxy. pia-wg-refresh holds your PIA credentials, so
+  #    it must not be handed the raw Docker socket (that is root on the host).
+  #    This proxy answers exactly one call, POST /containers/gluetun/restart,
+  #    and returns 403 for everything else.
+  #
+  #    It runs as root on purpose (the socket is root-owned) with every
+  #    capability dropped; the template says so explicitly. See
+  #    restart-only-docker-proxy.cfg.template for the full reasoning.
+  # ---------------------------------------------------------------------------
+  pia-wg-refresh-proxy:
+    image: tecnativa/docker-socket-proxy:latest # pin by digest in real use
+    container_name: pia-wg-refresh-proxy
+    environment:
+      PIA_WG_RESTART_TARGET: gluetun # must equal the Gluetun container_name above
+      LOG_LEVEL: info
+    volumes:
+      - ./restart-only-docker-proxy.cfg.template:/usr/local/etc/haproxy/haproxy.cfg.template:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - refresh_net
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /run
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # 3. The config daemon. On the LAN (NOT in Gluetun's namespace) so it can
+  #    always reach PIA to register a fresh key, even when the tunnel is dead.
+  #    Watches Gluetun's control server, rewrites wg0.conf, restarts Gluetun
+  #    through the proxy above, and hands port-forward metadata to pia-wg-pf.
+  # ---------------------------------------------------------------------------
+  pia-wg-refresh:
+    image: *pia-wg-image
+    container_name: pia-wg-refresh
+    environment:
+      PIA_USERNAME: ${PIA_USERNAME:?Set PIA_USERNAME in .env}
+      PIA_PASSWORD: ${PIA_PASSWORD:?Set PIA_PASSWORD in .env}
+      TZ: ${TZ:-UTC}
+      DOCKER_HOST: tcp://pia-wg-refresh-proxy:2375
+      # Optional alerting (Discord or ntfy). Unset = the hook does nothing.
+      PIA_WG_ALERT_WEBHOOK: ${PIA_WG_ALERT_WEBHOOK:-}
+    command: >
+      refresh
+        --region=${PIA_REGION:?Set PIA_REGION in .env}
+        --state-dir=/gluetun/wireguard
+        --port-forwarding
+        --ipv6-mode=${IPV6_MODE:-kill}
+        --refresh-interval=12h
+        --refresh-jitter=30m
+        --health-check-interval=1m
+        --control-server-url=http://gluetun:8000
+        --recovery-cooldown=3m
+        --restart-container=gluetun
+        --on-failure=pia-wg-alert
+        --on-recovered=pia-wg-alert
+        --verbose
+    volumes:
+      - ./config/gluetun:/gluetun
+    networks:
+      - default
+      - refresh_net
+    healthcheck:
+      # Reports unhealthy only for a sustained problem. Never restarts anything.
+      test: ["CMD", "pia-wg-config", "healthcheck", "--state-dir=/gluetun/wireguard"]
+      interval: 1m
+      timeout: 10s
+      retries: 3
+      start_period: 2m
+    depends_on:
+      gluetun:
+        condition: service_started
+      pia-wg-refresh-proxy:
+        condition: service_started
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # 4. The port-forward daemon. Inside Gluetun's network namespace, because the
+  #    PIA port-forward gateway (10.x.0.1:19999) is reachable only through the
+  #    tunnel. Picks up each new registration the refresher writes.
+  #
+  #    A Gluetun restart rebuilds the namespace this container is joined to and
+  #    leaves it loopback-only. Something must restart it afterwards; see
+  #    "Keeping pia-wg-pf attached" in docs/gluetun.md (gluetun-monitor).
+  # ---------------------------------------------------------------------------
+  pia-wg-pf:
+    image: *pia-wg-image
+    container_name: pia-wg-pf
+    network_mode: "service:gluetun"
+    environment:
+      PIA_USERNAME: ${PIA_USERNAME:?Set PIA_USERNAME in .env}
+      PIA_PASSWORD: ${PIA_PASSWORD:?Set PIA_PASSWORD in .env}
+      TZ: ${TZ:-UTC}
+    command: >
+      pf
+        --region=${PIA_REGION:?Set PIA_REGION in .env}
+        --state-dir=/gluetun/wireguard
+        --wait-for-gateway
+        --verbose
+    volumes:
+      - ./config/gluetun:/gluetun
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    restart: unless-stopped
+
+networks:
+  # Shared only by pia-wg-refresh and its proxy; no other container can reach it.
+  refresh_net:
+    internal: true

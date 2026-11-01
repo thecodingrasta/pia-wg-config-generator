@@ -64,7 +64,7 @@ func (p *PFClient) GetSignature(gateway string, token string) (PFSignatureRespon
 	if err != nil {
 		return sig, payload, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return sig, payload, fmt.Errorf("getSignature failed: %s", resp.Status)
@@ -107,7 +107,7 @@ func (p *PFClient) BindPort(gateway string, sig PFSignatureResponse) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("bindPort failed: %s", resp.Status)

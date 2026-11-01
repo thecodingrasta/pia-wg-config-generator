@@ -1,0 +1,95 @@
+#!/bin/sh
+# pia-wg-alert - deliver a pia-wg-config alert or recovery notice to a webhook.
+#
+# Wire it up with:
+#   refresh ... --on-failure=pia-wg-alert --on-recovered=pia-wg-alert
+#
+# Configuration (environment):
+#   PIA_WG_ALERT_WEBHOOK  Where to send. UNSET OR EMPTY = do nothing, exit 0.
+#   PIA_WG_ALERT_FORMAT   auto (default) | discord | ntfy | json
+#                         auto picks "discord" for discord.com / discordapp.com
+#                         webhook URLs and "ntfy" for everything else.
+#   PIA_WG_ALERT_PREFIX   Title prefix (default "pia-wg").
+#
+# Event data, set by pia-wg-config for each notification:
+#   PIA_WG_EVENT, PIA_WG_MESSAGE, PIA_WG_REGION, PIA_WG_ATTEMPTS,
+#   PIA_WG_OUTAGE_SECONDS
+#
+# The message is redacted by pia-wg-config before it gets here, and this script
+# runs with a scrubbed environment (no PIA account credentials). It never
+# prints the webhook URL: that URL is itself a secret.
+set -u
+
+url="${PIA_WG_ALERT_WEBHOOK:-}"
+[ -n "$url" ] || exit 0
+
+event="${PIA_WG_EVENT:-failure}"
+message="${PIA_WG_MESSAGE:-no message}"
+region="${PIA_WG_REGION:-unknown}"
+attempts="${PIA_WG_ATTEMPTS:-0}"
+outage="${PIA_WG_OUTAGE_SECONDS:-0}"
+prefix="${PIA_WG_ALERT_PREFIX:-pia-wg}"
+format="${PIA_WG_ALERT_FORMAT:-auto}"
+
+if [ "$event" = "recovered" ]; then
+	title="$prefix: tunnel recovered"
+	priority="default"
+	tags="white_check_mark"
+else
+	title="$prefix: tunnel recovery FAILED"
+	priority="high"
+	tags="rotating_light"
+fi
+
+if [ "$format" = "auto" ]; then
+	case "$url" in
+	*discord.com/api/webhooks/* | *discordapp.com/api/webhooks/*) format="discord" ;;
+	*) format="ntfy" ;;
+	esac
+fi
+
+# Escape a value for embedding in a JSON string (single line).
+json_escape() {
+	printf '%s' "$1" | tr '\r\n\t' '   ' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+# Send the request; print only the HTTP status, never the URL.
+post() { # post <content-type> <body> [extra curl args...]
+	ctype="$1"
+	body="$2"
+	shift 2
+	code=$(curl -sS --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' \
+		-X POST -H "Content-Type: $ctype" "$@" --data-binary "$body" "$url" 2>&1) || {
+		echo "alert not sent: curl failed ($(printf '%s' "$code" | tr '\n' ' ' | cut -c1-120))"
+		exit 1
+	}
+	case "$code" in
+	2??) echo "alert sent (HTTP $code, format $format)" ;;
+	*)
+		echo "alert not sent: HTTP $code"
+		exit 1
+		;;
+	esac
+}
+
+text=$(printf '%s' "$message" | cut -c1-1500)
+
+case "$format" in
+discord)
+	# Bold title, newline, message. The newline is a JSON escape, not a raw one.
+	post "application/json" "{\"username\":\"$(json_escape "$prefix")\",\"content\":\"**$(json_escape "$title")**\\n$(json_escape "$text")\"}"
+	;;
+json)
+	post "application/json" "{\"event\":\"$(json_escape "$event")\",\"title\":\"$(json_escape "$title")\",\"message\":\"$(json_escape "$message")\",\"region\":\"$(json_escape "$region")\",\"attempts\":$(printf '%d' "$attempts" 2>/dev/null || echo 0),\"outage_seconds\":$(printf '%d' "$outage" 2>/dev/null || echo 0)}"
+	;;
+ntfy)
+	# ntfy takes the message as the plain-text body; metadata goes in headers
+	# (ASCII only).
+	post "text/plain" "$message" \
+		-H "Title: $title" -H "Priority: $priority" -H "Tags: $tags"
+	;;
+*)
+	echo "alert not sent: unknown PIA_WG_ALERT_FORMAT '$format' (use auto, discord, ntfy or json)"
+	exit 1
+	;;
+esac

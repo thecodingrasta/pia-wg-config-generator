@@ -40,6 +40,19 @@ const (
 
 	// PIA requires BindPort roughly every 15 minutes. We renew at 14m to be safe.
 	defaultPFRenewInterval = 14 * time.Minute
+
+	// Reactive-recovery defaults (refresh subcommand). The refresh loop runs a
+	// cheap health check this often; on a confirmed dead tunnel it regenerates
+	// immediately under single-flight with exponential backoff.
+	defaultHealthCheckInterval = 1 * time.Minute
+	defaultRecoveryBackoffMin  = 30 * time.Second
+	defaultRecoveryBackoffMax  = 10 * time.Minute
+	// defaultRecoveryCooldown must exceed a realistic cold WireGuard handshake
+	// so a just-recovered tunnel is given time to come up before the loop would
+	// consider re-registering. 3m matches gluetun's 180s start_period.
+	defaultRecoveryCooldown = 3 * time.Minute
+	defaultControlServerURL = "http://127.0.0.1:8000"
+	defaultControlTimeout   = 5 * time.Second
 )
 
 // pfLeaseState holds the data needed to renew a port-forwarding lease.
@@ -84,15 +97,23 @@ func main() {
 }
 
 func buildApp() *cli.App {
+	// urfave/cli's default version flag claims the "-v" alias, which the global
+	// --verbose flag already owns. Register --version without an alias.
+	cli.VersionFlag = &cli.BoolFlag{Name: "version", Usage: "print the version and exit"}
+
 	app := &cli.App{
 		Name:      defaultAppName,
 		Usage:     "Generate and manage WireGuard configs for Private Internet Access (PIA)",
+		Version:   buildVersionString(),
 		UsageText: buildUsageText(),
 		Flags:     buildGenerateFlags(),
 		Commands: []*cli.Command{
 			buildGenerateCommand(),
 			buildRegionsCommand(),
 			buildDaemonCommand(),
+			buildRefreshCommand(),
+			buildPFCommand(),
+			buildHealthcheckCommand(),
 		},
 		// Backwards compat: `pia-wg-config -o wg0.conf USER PASS` still works.
 		Action: func(c *cli.Context) error {
@@ -200,7 +221,7 @@ func resolveCredentials(c *cli.Context) (string, string, error) {
 	}
 
 	if username == "" || password == "" {
-		return "", "", errors.New("Missing Credentials: Provide USERNAME PASSWORD args or set --username/--password (or env PIA_USERNAME/PIA_PASSWORD)")
+		return "", "", errors.New("missing credentials: provide USERNAME PASSWORD args or set --username/--password (or env PIA_USERNAME/PIA_PASSWORD)")
 	}
 
 	return username, password, nil
@@ -288,18 +309,6 @@ func expandConfigHookCommand(command string, stateDir string, configPath string,
 	return expanded
 }
 
-func runConfigChangeActions(command string, restartContainer string, dockerSocket string, stateDir string, configPath string, forwardedPortPath string, port string, verbose bool) error {
-	if err := runConfigHook(command, stateDir, configPath, forwardedPortPath, port, verbose); err != nil {
-		return err
-	}
-
-	if restartContainer == "" {
-		return nil
-	}
-
-	return restartDockerContainer(dockerSocket, restartContainer, verbose)
-}
-
 func restartDockerContainer(socketPath string, container string, verbose bool) error {
 	if strings.TrimSpace(socketPath) == "" {
 		socketPath = defaultDockerSocket
@@ -307,6 +316,50 @@ func restartDockerContainer(socketPath string, container string, verbose bool) e
 
 	client := dockerSocketHTTPClient(socketPath)
 	return restartDockerContainerWithClient(client, "http://docker", container, verbose)
+}
+
+// dockerEndpoint resolves how to reach the Docker API.
+//
+//   - host "tcp://name:2375" or "http://name:2375": plain HTTP to that address,
+//     which is how a least-privilege docker-socket-proxy is reached;
+//   - host "unix:///path": a Unix socket at that path;
+//   - empty host: the Unix socket at socketPath (the original behaviour).
+//
+// TLS endpoints (https://, tcp with certs, ssh://) are rejected rather than
+// silently downgraded to plaintext.
+func dockerEndpoint(host, socketPath string) (client *http.Client, baseURL string, err error) {
+	host = strings.TrimSpace(host)
+	switch {
+	case host == "":
+		if strings.TrimSpace(socketPath) == "" {
+			socketPath = defaultDockerSocket
+		}
+		return dockerSocketHTTPClient(socketPath), "http://docker", nil
+
+	case strings.HasPrefix(host, "unix://"):
+		return dockerSocketHTTPClient(strings.TrimPrefix(host, "unix://")), "http://docker", nil
+
+	case strings.HasPrefix(host, "tcp://"), strings.HasPrefix(host, "http://"):
+		addr := strings.TrimPrefix(strings.TrimPrefix(host, "tcp://"), "http://")
+		addr = strings.TrimRight(addr, "/")
+		if addr == "" || strings.ContainsAny(addr, "/ ") {
+			return nil, "", fmt.Errorf("invalid docker host %q: expected tcp://HOST:PORT", host)
+		}
+		return &http.Client{Timeout: 30 * time.Second}, "http://" + addr, nil
+
+	default:
+		return nil, "", fmt.Errorf("unsupported docker host %q: use tcp://HOST:PORT (plain HTTP to a socket proxy) or unix:///PATH", host)
+	}
+}
+
+// restartDockerContainerVia restarts a container using the endpoint selected by
+// dockerEndpoint.
+func restartDockerContainerVia(host, socketPath, container string, verbose bool) error {
+	client, baseURL, err := dockerEndpoint(host, socketPath)
+	if err != nil {
+		return err
+	}
+	return restartDockerContainerWithClient(client, baseURL, container, verbose)
 }
 
 func dockerSocketHTTPClient(socketPath string) *http.Client {
@@ -343,7 +396,7 @@ func restartDockerContainerWithClient(client *http.Client, baseURL string, conta
 	if err != nil {
 		return fmt.Errorf("docker restart %q failed: %w", container, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
@@ -515,6 +568,7 @@ func runRegions(c *cli.Context) error {
 
 type daemonStatus struct {
 	Region            string    `json:"region"`
+	Mode              string    `json:"mode,omitempty"`
 	LastGenerateUTC   time.Time `json:"last_generate_utc"`
 	LastForwardPort   string    `json:"last_forward_port,omitempty"`
 	LastError         string    `json:"last_error,omitempty"`
@@ -522,6 +576,66 @@ type daemonStatus struct {
 	PortForwarding    bool      `json:"port_forwarding"`
 	ServerNameEnabled bool      `json:"server_name_enabled"`
 	IPv6Mode          string    `json:"ipv6_mode"`
+
+	// Observability. These describe the live registration so an operator (or a
+	// healthcheck) can see tunnel state without shelling into the container.
+	//
+	// Optional fields are OMITTED (never zero-valued) when they are genuinely
+	// unknown; see docs/gluetun.md "status.json" for when each can be absent.
+	RegistrationUTC      time.Time `json:"registration_utc,omitempty"`
+	RegistrationAgeSecs  int64     `json:"registration_age_seconds"`
+	ExpectedExpiryUTC    time.Time `json:"expected_expiry_utc,omitempty"`
+	LifetimeSource       string    `json:"lifetime_source,omitempty"` // "measured" or "fallback"
+	MeasuredLifetimeSecs int64     `json:"measured_lifetime_seconds,omitempty"`
+	TunnelHealthy        bool      `json:"tunnel_healthy"`
+	ControlStatus        string    `json:"control_status,omitempty"` // gluetun's reported VPN status
+	PublicIPPresent      *bool     `json:"public_ip_present,omitempty"`
+	LastHealthCheckUTC   time.Time `json:"last_health_check_utc,omitempty"`
+	LastHealthyUTC       time.Time `json:"last_healthy_utc,omitempty"`
+	UnhealthySinceUTC    time.Time `json:"unhealthy_since_utc,omitempty"`
+	LastRecoveryUTC      time.Time `json:"last_recovery_utc,omitempty"`
+	RecoveryCount        int64     `json:"recovery_count,omitempty"`
+	FailedAttempts       int       `json:"consecutive_failed_attempts,omitempty"`
+}
+
+// MarshalJSON renders daemonStatus, omitting every time field that is the zero
+// value. encoding/json's omitempty does not omit a zero time.Time, which would
+// otherwise print "0001-01-01T00:00:00Z" and mislead an operator or a
+// healthcheck. The two always-present keys (last_generate_utc,
+// next_refresh_utc) are kept for backwards compatibility with the original
+// daemon's output and are always real values in refresh mode.
+func (s daemonStatus) MarshalJSON() ([]byte, error) {
+	type alias daemonStatus // avoid recursion
+	raw, err := json.Marshal(alias(s))
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]json.RawMessage{}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+
+	const zeroTime = `"0001-01-01T00:00:00Z"`
+	omittable := []string{
+		"registration_utc", "expected_expiry_utc", "last_health_check_utc",
+		"last_healthy_utc", "unhealthy_since_utc", "last_recovery_utc",
+	}
+	// In refresh mode the two legacy keys are always meaningful, so a zero value
+	// there would be a bug: drop it rather than print a misleading year 1.
+	if s.Mode == "refresh" {
+		omittable = append(omittable, "last_generate_utc", "next_refresh_utc")
+	}
+	for _, key := range omittable {
+		if v, ok := out[key]; ok && string(v) == zeroTime {
+			delete(out, key)
+		}
+	}
+	// An age of 0s is a real value for a registration made a moment ago, so it is
+	// not omitted by value. It is only meaningless when no registration is known.
+	if s.RegistrationUTC.IsZero() {
+		delete(out, "registration_age_seconds")
+	}
+	return json.Marshal(out)
 }
 
 type pendingPortForward struct {
@@ -817,7 +931,6 @@ func runDaemon(c *cli.Context) error {
 				lease.disable()
 			} else {
 
-				currentPort = portStr
 				status.LastForwardPort = portStr
 
 				if err := atomicWriteFile(forwardedPortPath, []byte(portStr), 0644); err != nil {
@@ -989,6 +1102,27 @@ func writeStatus(path string, status daemonStatus) error {
 		return err
 	}
 	return atomicWriteFile(path, data, 0644)
+}
+
+// readPreviousRegion returns the region recorded in an existing status.json.
+// ok is false when the file is missing, unreadable or has no region, in which
+// case a previous registration cannot be vouched for.
+func readPreviousRegion(statusPath string) (region string, ok bool) {
+	data, err := os.ReadFile(statusPath)
+	if err != nil {
+		return "", false
+	}
+	var prev struct {
+		Region string `json:"region"`
+	}
+	if err := json.Unmarshal(data, &prev); err != nil || strings.TrimSpace(prev.Region) == "" {
+		return "", false
+	}
+	return strings.TrimSpace(prev.Region), true
+}
+
+func envOrEmpty(key string) string {
+	return os.Getenv(key)
 }
 
 func writePendingPortForward(path string, key pia.AddKeyResult) error {
