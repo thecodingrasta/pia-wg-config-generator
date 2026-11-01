@@ -1,0 +1,23 @@
+# Controls the categories in auto-generated release notes (`gh release create
+# --generate-notes`). Labels are applied by Dependabot or set on the PR.
+changelog:
+  exclude:
+    labels:
+      - "skip-changelog"
+    authors:
+      - "dependabot[bot]"
+  categories:
+    - title: "Breaking changes"
+      labels: ["breaking"]
+    - title: "Features"
+      labels: ["enhancement", "feature"]
+    - title: "Bug fixes"
+      labels: ["bug", "fix"]
+    - title: "Security"
+      labels: ["security"]
+    - title: "Documentation"
+      labels: ["documentation"]
+    - title: "Dependencies and CI"
+      labels: ["dependencies", "ci"]
+    - title: "Other changes"
+      labels: ["*"]

@@ -1,0 +1,27 @@
+# Normalize line endings so editors/OSes don't churn the diff.
+# The repository convention is LF for all text; Git stores LF and checks out LF.
+* text=auto eol=lf
+
+# Explicit text types (defensive — covers files Git might misdetect).
+*.go     text eol=lf
+*.md     text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+*.sh     text eol=lf
+*.json   text eol=lf
+*.mod    text eol=lf
+*.sum    text eol=lf
+Dockerfile text eol=lf
+Makefile   text eol=lf
+.env.example text eol=lf
+
+# Windows-only scripts keep CRLF so they run correctly on Windows.
+*.ps1    text eol=crlf
+*.bat    text eol=crlf
+*.cmd    text eol=crlf
+
+# Treat these as binary (never normalize / never diff as text).
+*.png    binary
+*.jpg    binary
+*.gif    binary
+*.ico    binary

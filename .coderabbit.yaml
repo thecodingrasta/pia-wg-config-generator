@@ -1,0 +1,74 @@
+# CodeRabbit configuration. Free for open-source repositories once the
+# CodeRabbit GitHub App is installed on this repo: https://coderabbit.ai
+# Schema: https://coderabbit.ai/integrations/schema.v2.json
+language: "en-GB"
+tone_instructions: "Direct and specific. Prefer concrete defects over style opinions."
+
+reviews:
+  profile: "chill"
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: true
+  sequence_diagrams: false
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - "main"
+      - "dev"
+
+  # Never review vendored third-party code or committed binaries.
+  path_filters:
+    - "!vendor/**"
+    - "!dist/**"
+    - "!go.sum"
+
+  path_instructions:
+    - path: "**/*.go"
+      instructions: |
+        This is a long-running network daemon. Prioritise: goroutine leaks and
+        data races, unclosed response bodies, unbounded retry loops, missing
+        timeouts or context cancellation, and error wrapping with %w. Credentials
+        and tokens must never be logged. Flag changes that could re-register a
+        PIA WireGuard key more often than intended, since each refresh creates a
+        new server-side registration.
+    - path: "refresh.go"
+      instructions: |
+        Recovery logic. Check single-flight guarantees, backoff and cooldown
+        behaviour, and that a failed recovery cannot cause a restart loop.
+    - path: ".github/workflows/**"
+      instructions: |
+        Third-party actions must be pinned to a full commit SHA with a version
+        comment. Jobs must declare least-privilege `permissions`. Flag any use of
+        pull_request_target or untrusted input interpolated into `run:` steps.
+    - path: "docs/**"
+      instructions: |
+        Documentation must match the CLI. Verify every flag, default and file
+        name against the Go source before approving.
+    - path: "README.md"
+      instructions: |
+        Public-facing. Check commands, flags and compose examples against the
+        implementation, and that the download table matches the release assets.
+
+  tools:
+    golangci-lint:
+      enabled: true
+    actionlint:
+      enabled: true
+    gitleaks:
+      enabled: true
+    hadolint:
+      enabled: true
+    shellcheck:
+      enabled: true
+    yamllint:
+      enabled: true
+    markdownlint:
+      enabled: true
+    osvScanner:
+      enabled: true
+
+chat:
+  auto_reply: true

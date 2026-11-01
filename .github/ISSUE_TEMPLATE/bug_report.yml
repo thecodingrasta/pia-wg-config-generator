@@ -1,0 +1,153 @@
+name: Bug Report
+description: Report a reproducible bug with pia-wg-config-generator.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        First and foremost, thank you for reporting a bug.
+
+        Please remove secrets before posting logs or configs:
+        - PIA username/password
+        - WireGuard private keys
+        - PIA tokens
+        - generated config private keys
+        - public IP addresses, if you consider them sensitive
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: I have searched existing issues and discussions.
+          required: true
+        - label: I have removed secrets from logs/configs.
+          required: true
+        - label: I can reproduce this issue.
+          required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Tool version
+      description: Run `pia-wg-config --version` if available, or provide the release/commit/build used.
+      placeholder: "v1.0.0 / commit SHA / local build"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: command
+    attributes:
+      label: Command
+      description: Which command is affected?
+      options:
+        - generate
+        - regions
+        - daemon
+        - Docker/Gluetun flow
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "Ubuntu 24.04, Debian 12, Windows 11, macOS 15, Alpine, etc."
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment details
+      description: Include Docker, Gluetun, router/firewall, Go version, architecture, or anything relevant.
+      placeholder: |
+        OS:
+        Architecture:
+        Docker version:
+        Gluetun version:
+        Router/firewall:
+        Go version:
+    validations:
+      required: false
+
+  - type: textarea
+    id: command_used
+    attributes:
+      label: Command or Compose snippet
+      description: Paste the command or relevant Compose section that triggers the issue.
+      render: shell
+      placeholder: |
+        pia-wg-config generate --region ca_toronto --port-forwarding --outfile wg0.conf
+    validations:
+      required: true
+
+  - type: input
+    id: region
+    attributes:
+      label: PIA region
+      placeholder: "ca_toronto, uk_southampton, amsterdam404, etc."
+    validations:
+      required: false
+
+  - type: dropdown
+    id: port_forwarding
+    attributes:
+      label: Port forwarding enabled?
+      options:
+        - "Yes"
+        - "No"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: ipv6_mode
+    attributes:
+      label: IPv6 mode
+      options:
+        - "on"
+        - "off"
+        - "kill"
+        - "not set"
+        - "not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      placeholder: "What did you expect to happen?"
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      placeholder: "What actually happened?"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Paste relevant logs with secrets removed.
+      render: text
+      placeholder: |
+        Paste logs here.
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      placeholder: "Anything else that might help debug this?"
+    validations:
+      required: false

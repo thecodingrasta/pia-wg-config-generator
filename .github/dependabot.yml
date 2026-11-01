@@ -1,0 +1,52 @@
+version: 2
+
+# Dependencies are vendored (vendor/). Dependabot runs `go mod vendor` for the
+# gomod ecosystem, so vendor/ stays in sync with go.mod in the same PR.
+
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    labels: ["dependencies", "go"]
+    groups:
+      # One PR for routine bumps; security updates are still raised separately.
+      go-minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    labels: ["dependencies", "ci"]
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Dockerfile base images (golang, alpine).
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "deps"
+    labels: ["dependencies", "docker"]
+
+  # Test-harness image used by the Docker smoke tests.
+  - package-ecosystem: "docker"
+    directory: "/system-tests/common/tester"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    commit-message:
+      prefix: "deps"
+    labels: ["dependencies", "docker"]

@@ -1,0 +1,88 @@
+name: Feature Request
+description: Suggest a focused improvement to pia-wg-config-generator.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement.
+
+        For larger ideas or open-ended discussion, please use GitHub Discussions first.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: I have searched existing issues and discussions.
+          required: true
+        - label: This is a focused feature request rather than a general support question.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What problem does this feature solve?
+      placeholder: "I'm trying to..., but currently..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed solution
+      description: What would you like to happen?
+      placeholder: "Add a flag / output / mode / docs page that..."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - CLI
+        - Daemon
+        - Docker
+        - Gluetun
+        - Port forwarding
+        - Region selection
+        - IPv6
+        - Router/firewall support
+        - Windows
+        - Documentation
+        - Testing
+        - Release/package distribution
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      placeholder: "Any workaround or alternative design you've considered?"
+    validations:
+      required: false
+
+  - type: textarea
+    id: examples
+    attributes:
+      label: Example usage
+      description: Show what the command/config/API might look like.
+      render: shell
+      placeholder: |
+        pia-wg-config generate --example-flag value
+    validations:
+      required: false
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Why this matters
+      placeholder: "Who benefits from this and why?"
+    validations:
+      required: false

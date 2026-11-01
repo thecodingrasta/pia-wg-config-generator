@@ -5,90 +5,282 @@ on:
     branches: ["main", "master"]
   pull_request:
     branches: ["main", "master"]
+  workflow_dispatch:
+  # release.yml runs exactly this suite as its validation gate, so a release can
+  # never ship something the everyday pipeline would have rejected.
+  workflow_call:
+
+# Least privilege by default; individual jobs ask for more only if they need it.
+permissions:
+  contents: read
 
 # Cancel in-flight runs for the same ref so stale runs don't consume quota.
+# The "validate-" prefix is load-bearing: when release.yml calls this workflow,
+# github.workflow is the CALLER's name, and concurrency group names are
+# case-insensitive. Without the prefix the two groups can be identical, and
+# GitHub cancels the run for a "deadlock".
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: validate-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+# NOTE on Go versions: the unit-test matrix runs the oldest supported toolchain
+# (the go.mod floor, written below as 1.26.x) and the newest stable one. Every
+# other job resolves its toolchain from go.mod. The floor in go.mod must stay
+# >= 1.24 because older linkers do not emit LC_UUID, which makes macOS 15+ dyld
+# abort every Go test binary ("missing LC_UUID load command").
+# See https://github.com/golang/go/issues/68678.
+#
+# Third-party actions are pinned to full commit SHAs (the trailing comment is the
+# human-readable version). Dependabot keeps both in sync.
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────
-  # Unit tests — runs on all three platforms
+  # Unit tests - every platform, on the oldest supported and the newest Go
   # ─────────────────────────────────────────────────────────────────────────
   unit:
-    name: Unit tests (${{ matrix.os }})
+    name: Unit tests (${{ matrix.os }}, Go ${{ matrix.go }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        go: ["1.26.x", stable] # keep the first entry equal to the go.mod floor
 
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          go-version-file: go.mod
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ matrix.go }}
           cache-dependency-path: go.sum
 
       - name: go vet
         run: go vet ./...
 
       - name: Unit tests
-        run: go test -mod=vendor ./...
+        run: go test -mod=vendor -count=1 ./...
 
   # ─────────────────────────────────────────────────────────────────────────
-  # Race detector — Linux only (requires CGO / gcc)
+  # Race detector + coverage - Linux only (requires CGO / gcc)
   # ─────────────────────────────────────────────────────────────────────────
   race:
     name: Race detector
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
-      - name: Unit tests (race)
-        run: go test -race -mod=vendor ./...
+      - name: Unit tests (race + coverage)
+        run: go test -race -count=1 -mod=vendor -covermode=atomic -coverprofile=coverage.out ./...
+
+      - name: Coverage summary
+        run: |
+          {
+            echo "### Test coverage"
+            echo
+            echo '```'
+            go tool cover -func=coverage.out | tail -n 1
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage profile
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-profile
+          path: coverage.out
+          retention-days: 14
 
   # ─────────────────────────────────────────────────────────────────────────
-  # Build check — verify the binary compiles on all platforms
+  # Static analysis - golangci-lint (config in .golangci.yml)
+  # ─────────────────────────────────────────────────────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.15.0
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Known vulnerabilities - govulncheck reports only symbols this code reaches,
+  # so a failure here is actionable. Also part of the release gate. A separate
+  # scheduled workflow (vulncheck.yml) catches advisories published later.
+  # ─────────────────────────────────────────────────────────────────────────
+  vulnerabilities:
+    name: Vulnerabilities
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+          # Standard-library advisories are fixed in Go patch releases, so scan
+          # with the newest patch of the module's Go minor version.
+          check-latest: true
+
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Module hygiene - go.mod, go.sum and vendor/ must be reproducible
+  # ─────────────────────────────────────────────────────────────────────────
+  module-hygiene:
+    name: Module hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: go mod tidy is a no-op
+        run: |
+          go mod tidy
+          test -z "$(git status --porcelain -- go.mod go.sum)" \
+            || { git status --porcelain -- go.mod go.sum; git diff -- go.mod go.sum; echo "::error::go.mod/go.sum are not tidy. Run 'go mod tidy' and commit."; exit 1; }
+
+      - name: vendor/ matches go.mod
+        run: |
+          go mod vendor
+          test -z "$(git status --porcelain -- vendor)" \
+            || { git status --porcelain -- vendor | head -n 20; echo "::error::vendor/ is out of sync. Run 'go mod vendor' and commit."; exit 1; }
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Build check - the binary compiles and runs on all three desktop platforms
   # ─────────────────────────────────────────────────────────────────────────
   build:
     name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
       - name: Build binary
-        run: go build -mod=vendor -o pia-wg-config${{ matrix.os == 'windows-latest' && '.exe' || '' }} .
+        run: go build -mod=vendor -trimpath -o pia-wg-config${{ matrix.os == 'windows-latest' && '.exe' || '' }} .
+
+      - name: Smoke test --version
+        run: ./pia-wg-config${{ matrix.os == 'windows-latest' && '.exe' || '' }} --version
+        shell: bash
 
       - name: Upload binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pia-wg-config-${{ matrix.os }}
           path: pia-wg-config${{ matrix.os == 'windows-latest' && '.exe' || '' }}
           retention-days: 7
 
   # ─────────────────────────────────────────────────────────────────────────
-  # Integration tests — real PIA API; secrets-gated, Linux only
+  # Cross-compile - every target the project ships or documents must build with
+  # the exact flags the release uses (static, CGO off), so the release workflow
+  # never meets a compile error for the first time.
+  # ─────────────────────────────────────────────────────────────────────────
+  cross-compile:
+    name: Cross-compile (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: windows, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -mod=vendor -trimpath -ldflags "-s -w" -o /dev/null .
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Container image - multi-arch build check (nothing is pushed from CI)
+  # ─────────────────────────────────────────────────────────────────────────
+  docker-build:
+    name: Docker image (amd64 + arm64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Integration tests - real PIA API; secrets-gated, Linux only. They skip when
+  # called from release.yml (secrets are not passed down) and on fork PRs.
   # ─────────────────────────────────────────────────────────────────────────
   integration:
     name: Integration tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Only run when secrets are available (skipped on forks / unsigned PRs)
     if: >
       github.event_name == 'push' ||
@@ -99,124 +291,122 @@ jobs:
       PIA_REGION:   ${{ secrets.PIA_REGION || 'uk_southampton' }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
 
       - name: Integration tests
         # go test skips gracefully if PIA_USERNAME/PIA_PASSWORD are unset
-        run: go test -mod=vendor -tags=integration -v ./pia/...
+        run: go test -mod=vendor -count=1 -tags=integration -v ./pia/...
 
   # ─────────────────────────────────────────────────────────────────────────
-  # System tests — Docker required; Linux + secrets
+  # Docker smoke tests - public-CI safe, no PIA credentials required
   # ─────────────────────────────────────────────────────────────────────────
   system-gluetun:
-    name: System test — Gluetun
+    name: Docker smoke - Gluetun
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: [unit, build]
-    if: >
-      github.event_name == 'push' ||
-      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - name: Run Gluetun system test
-        env:
-          PIA_USERNAME: ${{ secrets.PIA_USERNAME }}
-          PIA_PASSWORD: ${{ secrets.PIA_PASSWORD }}
-          PIA_REGION:   ${{ secrets.PIA_REGION || 'ca_toronto' }}
-          PIA_PF:       "0"
-          IPV6_MODE:    "auto"
-          TZ:           "UTC"
-          STATE_DIR:    "/state"
-          WG_CONF_NAME: "wg0.conf"
-          PF_PORT_FILE: "forwarded_port"
-          IP_CHECK_URL: "https://api.ipify.org"
-          VPN_SERVICE_PROVIDER: "custom"
-          VPN_TYPE:     "wireguard"
-          GLUETUN_WG_CONF: "/gluetun/wireguard/wg0.conf"
-          CURL_PATH:    ""
-        run: |
-          cd system-tests/gluetun
-          docker compose up --build --abort-on-container-exit --exit-code-from tester
-          docker compose down --volumes
+      - name: Run Gluetun Docker smoke test
+        run: bash system-tests/ci-smoke.sh gluetun
 
   system-gluetun-pf:
-    name: System test — Gluetun + Port Forwarding
+    name: Docker smoke - Gluetun + Port Forwarding
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: [unit, build]
-    if: >
-      github.event_name == 'push' ||
-      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - name: Run Gluetun + PF system test
-        env:
-          PIA_USERNAME: ${{ secrets.PIA_USERNAME }}
-          PIA_PASSWORD: ${{ secrets.PIA_PASSWORD }}
-          PIA_REGION:   ${{ secrets.PIA_PF_REGION || 'ca_toronto' }}
-          PIA_PF:       "1"
-          IPV6_MODE:    "auto"
-          TZ:           "UTC"
-          STATE_DIR:    "/state"
-          WG_CONF_NAME: "wg0.conf"
-          PF_PORT_FILE: "forwarded_port"
-          IP_CHECK_URL: "https://api.ipify.org"
-          VPN_SERVICE_PROVIDER: "custom"
-          VPN_TYPE:     "wireguard"
-          GLUETUN_WG_CONF: "/gluetun/wireguard/wg0.conf"
-          CURL_PATH:    ""
-        run: |
-          cd system-tests/gluetun
-          docker compose up --build --abort-on-container-exit --exit-code-from tester
-          docker compose down --volumes
+      - name: Run Gluetun + PF Docker smoke test
+        run: bash system-tests/ci-smoke.sh gluetun --pf
 
   system-wg-client:
-    name: System test — WireGuard client
+    name: Docker smoke - WireGuard client
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: [unit, build]
-    if: >
-      github.event_name == 'push' ||
-      (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Enable WireGuard kernel module
-        run: sudo modprobe wireguard
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - name: Run WireGuard client system test
+      - name: Run WireGuard client Docker smoke test
+        run: bash system-tests/ci-smoke.sh wireguard-client
+
+  # The documented four-container stack (docs/examples): the compose file is
+  # valid, the restart-only proxy starts clean and allows exactly one call, and
+  # the image ships the alert hook and a fail-closed healthcheck.
+  system-stack:
+    name: Docker smoke - four-container stack
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [unit, build]
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run the stack smoke test
+        run: bash system-tests/stack-smoke.sh
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Single required status check. Point branch protection at "CI gate" so the
+  # matrix can change without editing repository settings. A skipped job (for
+  # example integration tests on a fork PR) counts as passing; a failed or
+  # cancelled one does not.
+  # ─────────────────────────────────────────────────────────────────────────
+  ci-gate:
+    name: CI gate
+    if: always()
+    timeout-minutes: 5
+    needs:
+      - unit
+      - race
+      - lint
+      - vulnerabilities
+      - module-hygiene
+      - build
+      - cross-compile
+      - docker-build
+      - integration
+      - system-gluetun
+      - system-gluetun-pf
+      - system-wg-client
+      - system-stack
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate job results
         env:
-          PIA_USERNAME: ${{ secrets.PIA_USERNAME }}
-          PIA_PASSWORD: ${{ secrets.PIA_PASSWORD }}
-          PIA_REGION:   ${{ secrets.PIA_REGION || 'ca_toronto' }}
-          PIA_PF:       "0"
-          IPV6_MODE:    "auto"
-          TZ:           "UTC"
-          STATE_DIR:    "/state"
-          WG_CONF_NAME: "wg0.conf"
-          PF_PORT_FILE: "forwarded_port"
-          IP_CHECK_URL: "https://api.ipify.org"
-          VPN_SERVICE_PROVIDER: "custom"
-          VPN_TYPE:     "wireguard"
-          GLUETUN_WG_CONF: "/gluetun/wireguard/wg0.conf"
-          CURL_PATH:    ""
+          NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
-          cd system-tests/wireguard-client
-          docker compose up --build --abort-on-container-exit --exit-code-from tester
-          docker compose down --volumes
+          echo "$NEEDS_JSON" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          if echo "$NEEDS_JSON" | jq -e 'any(.[]; .result == "failure" or .result == "cancelled")' > /dev/null; then
+            echo "::error::One or more required jobs failed or were cancelled."
+            exit 1
+          fi

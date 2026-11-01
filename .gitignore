@@ -13,6 +13,19 @@
 .vscode/
 .env
 
+.go-build-cache/
+.go-path/
+.go-build-cache-ci/
+.go-path-ci/
+system-tests/.ci-state/
+pia-wg-config-ci*
+pia-wg-config-*-ci*
+release/
+dist/
+coverage.out
+
 # Dependency directories (remove the comment below to include it)
 # vendor/
-.codex
+.agents/
+.kiro/
+.codex/

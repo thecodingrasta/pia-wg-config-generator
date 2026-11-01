@@ -1,0 +1,26 @@
+# golangci-lint v2 configuration.
+# Docs: https://golangci-lint.run/usage/configuration/
+version: "2"
+
+run:
+  timeout: 5m
+  # Dependencies are vendored; never reach for the network during lint.
+  modules-download-mode: vendor
+
+linters:
+  # Keep the defaults (errcheck, govet, ineffassign, staticcheck, unused) and
+  # add checks that catch real defects in network/daemon code.
+  enable:
+    - errorlint     # use errors.Is/As and %w wrapping
+    - misspell
+    - unconvert
+    - usestdlibvars
+  exclusions:
+    # Generated and vendored code is never ours to lint.
+    generated: lax
+    paths:
+      - vendor
+
+formatters:
+  enable:
+    - gofmt

@@ -1,0 +1,139 @@
+name: Platform Support
+description: Request, confirm, or improve support for a router, firewall, NAS, container stack, or operating system.
+title: "[Platform]: "
+labels:
+  - platform-support
+  - feedback
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for platform-specific support notes.
+
+        Examples:
+        - OpenWrt
+        - MikroTik RouterOS
+        - pfSense
+        - OPNsense
+        - ASUS Merlin
+        - Unraid
+        - Synology
+        - TrueNAS
+        - Docker
+        - Gluetun
+        - Kubernetes
+        - headless Linux
+
+  - type: dropdown
+    id: request_type
+    attributes:
+      label: Request type
+      options:
+        - I successfully tested this platform
+        - I need help getting this platform working
+        - I want this platform documented
+        - I found a platform-specific issue
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: "OpenWrt, MikroTik RouterOS, pfSense, Unraid, Gluetun, etc."
+    validations:
+      required: true
+
+  - type: input
+    id: platform_version
+    attributes:
+      label: Platform version
+      placeholder: "OpenWrt 23.05, RouterOS 7.x, Unraid 6.12, Gluetun latest, etc."
+    validations:
+      required: false
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to achieve?
+      placeholder: |
+        Example:
+        Route all traffic through PIA WireGuard.
+        Utilise PIA port forwarding.
+        Refresh Gluetun configs automatically.
+        Import generated config into OpenWrt.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: setup_type
+    attributes:
+      label: Setup type
+      options:
+        - Bare-metal / host install
+        - Docker
+        - Docker Compose
+        - Gluetun
+        - Router/firewall import
+        - NAS
+        - Kubernetes
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: tool_version
+    attributes:
+      label: Tool version
+      placeholder: "v1.0.0 / commit SHA / local build"
+    validations:
+      required: false
+
+  - type: input
+    id: region
+    attributes:
+      label: PIA region
+      placeholder: "ca_toronto, uk_southampton, amsterdam404, etc."
+    validations:
+      required: false
+
+  - type: dropdown
+    id: port_forwarding
+    attributes:
+      label: Port forwarding needed?
+      options:
+        - "Yes"
+        - "No"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: config_notes
+    attributes:
+      label: Setup notes / config
+      description: Paste commands, Compose snippets, router notes, or import steps. Remove secrets first.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: result
+    attributes:
+      label: Result
+      placeholder: |
+        Did it work?
+        What failed?
+        What needed manual changes?
+        What should be documented?
+    validations:
+      required: true
+
+  - type: textarea
+    id: docs_suggestion
+    attributes:
+      label: Suggested documentation
+      placeholder: "Any wording, guide steps, screenshots, or platform-specific gotchas that should be added?"
+    validations:
+      required: false

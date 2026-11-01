@@ -162,7 +162,7 @@ func (p *PIAClient) GetToken() (string, error) {
 	}
 
 	// Rate-limiting is fatal — a fallback attempt would only make it worse.
-	if curlErr == ErrTooManyAttempts {
+	if errors.Is(curlErr, ErrTooManyAttempts) {
 		return "", curlErr
 	}
 
@@ -171,7 +171,7 @@ func (p *PIAClient) GetToken() (string, error) {
 	// 3. Metadata server fallback (regional server, CA-cert-pinned TLS).
 	token, err := p.getTokenFromMetadataServer()
 	if err != nil {
-		return "", fmt.Errorf("all token methods failed — curl: %v; metadata server: %v", curlErr, err)
+		return "", fmt.Errorf("all token methods failed — curl: %w; metadata server: %w", curlErr, err)
 	}
 
 	_ = writeCachedToken(token, 23*time.Hour)
@@ -251,7 +251,7 @@ func (p *PIAClient) getServerList() (PIAServerList, error) {
 	if err != nil {
 		return PIAServerList{}, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -324,7 +324,7 @@ func (p *PIAClient) generateMetadataServerList(list PIAServerList) (ServerList, 
 }
 
 func (p *PIAClient) executePIARequest(server Server, rawURL, token string) (*http.Response, error) {
-	req, err := http.NewRequest("GET", rawURL, nil)
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -386,7 +386,7 @@ func (p *PIAClient) executePIARequest(server Server, rawURL, token string) (*htt
 
 	// Buffer the body so callers can re-read it and we can inspect it here.
 	body, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if err != nil {
 		return nil, err
 	}
@@ -411,7 +411,7 @@ func (p *PIAClient) downloadPIACertificate() error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	p.caCert, err = io.ReadAll(resp.Body)
 	return err

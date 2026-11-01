@@ -1,0 +1,113 @@
+name: Region Failure
+description: Report a PIA region that fails to generate, connect, or support port forwarding as expected.
+title: "[Region]: "
+labels:
+  - region
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this when a specific PIA region fails or behaves differently than expected.
+
+        Please remove secrets before posting logs or generated configs.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-flight checks
+      options:
+        - label: I have searched existing issues for this region.
+          required: true
+        - label: I have removed secrets from logs/configs.
+          required: true
+
+  - type: input
+    id: region
+    attributes:
+      label: Region ID / name
+      placeholder: "ca_toronto, uk_southampton, amsterdam404, etc."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: failure_type
+    attributes:
+      label: Failure type
+      options:
+        - Region does not appear in list
+        - Config generation fails
+        - Generated config does not connect
+        - Port forwarding fails
+        - Region is incorrectly marked as port-forwarding capable
+        - Region should support port forwarding but does not appear to
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Tool version
+      placeholder: "v1.0.0 / commit SHA / local build"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "Ubuntu 24.04, Debian 12, Windows 11, macOS 15, Alpine, etc."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: command
+    attributes:
+      label: Command used
+      options:
+        - generate
+        - regions
+        - daemon
+        - Docker/Gluetun flow
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: command_used
+    attributes:
+      label: Command or config used
+      render: shell
+      placeholder: |
+        pia-wg-config generate --region ca_toronto --port-forwarding --outfile wg0.conf
+    validations:
+      required: true
+
+  - type: dropdown
+    id: port_forwarding
+    attributes:
+      label: Port forwarding requested?
+      options:
+        - "Yes"
+        - "No"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Output / logs
+      description: Paste relevant output with secrets removed.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      placeholder: "Anything else useful about this region or test?"
+    validations:
+      required: false

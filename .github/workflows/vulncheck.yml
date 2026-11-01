@@ -1,0 +1,40 @@
+name: Vulnerability scan (scheduled)
+
+# New advisories appear without any commit to this repository, so the
+# "Vulnerabilities" job in ci.yml (which gates every push, pull request and
+# release) cannot catch them on its own. This workflow re-scans on a schedule.
+# govulncheck only reports vulnerabilities whose vulnerable symbols this code
+# actually reaches, so a failure here is actionable, not noise.
+
+on:
+  schedule:
+    - cron: "41 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scheduled-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+          # Standard-library advisories are fixed in Go patch releases, so scan
+          # with the newest patch of the module's Go minor version.
+          check-latest: true
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
