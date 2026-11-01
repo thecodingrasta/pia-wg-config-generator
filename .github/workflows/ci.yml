@@ -340,6 +340,8 @@ jobs:
 
       - name: Run Gluetun + PF Docker smoke test
         run: bash system-tests/ci-smoke.sh gluetun --pf
+      - name: Run Gluetun + PF Docker smoke test
+        run: bash system-tests/ci-smoke.sh gluetun --pf
 
   system-wg-client:
     name: Docker smoke - WireGuard client

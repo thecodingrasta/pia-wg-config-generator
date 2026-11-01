@@ -14,6 +14,13 @@ GOENV      := set "GOCACHE=$(LOCAL_GOCACHE)" && set "GOPATH=$(LOCAL_GOPATH)" &&
 else
 GOENV      := GOCACHE="$(LOCAL_GOCACHE)" GOPATH="$(LOCAL_GOPATH)"
 endif
+LOCAL_GOCACHE ?= $(CURDIR)/.go-build-cache
+LOCAL_GOPATH  ?= $(CURDIR)/.go-path
+ifeq ($(OS),Windows_NT)
+GOENV      := set "GOCACHE=$(LOCAL_GOCACHE)" && set "GOPATH=$(LOCAL_GOPATH)" &&
+else
+GOENV      := GOCACHE="$(LOCAL_GOCACHE)" GOPATH="$(LOCAL_GOPATH)"
+endif
 
 # Pretty Colours
 GREEN  := \033[0;32m
@@ -59,6 +66,7 @@ help:
 build:
 	@echo "$(GREEN)==> Building $(BIN_NAME)$(RESET)"
 	$(GOENV) $(GO) build $(GOFLAGS) -o $(BIN_NAME) .
+	$(GOENV) $(GO) build $(GOFLAGS) -o $(BIN_NAME) .
 
 # ------------------------------------------------------------
 # Unit tests (offline, mocked)
@@ -67,10 +75,12 @@ build:
 test:
 	@echo "$(GREEN)==> Running unit tests$(RESET)"
 	$(GOENV) $(GO) test $(GOFLAGS) $(PKG)
+	$(GOENV) $(GO) test $(GOFLAGS) $(PKG)
 
 .PHONY: test-both
 test-both:
 	@echo "$(GREEN)==> Running unit tests$(RESET)"
+	$(GOENV) $(GO) test $(GOFLAGS) $(PKG)
 	$(GOENV) $(GO) test $(GOFLAGS) $(PKG)
 	$(MAKE) test-integration
 
@@ -78,12 +88,15 @@ test-both:
 test-all:
 	@echo "$(GREEN)==> Running unit tests$(RESET)"
 	$(GOENV) $(GO) test $(GOFLAGS) $(PKG)
+	$(GOENV) $(GO) test $(GOFLAGS) $(PKG)
 	$(MAKE) test-integration
+	$(MAKE) test-wireguard-client
 	$(MAKE) test-wireguard-client
 
 .PHONY: test-race
 test-race:
 	@echo "$(GREEN)==> Running unit tests (race detector)$(RESET)"
+	$(GOENV) $(GO) test -race $(PKG)
 	$(GOENV) $(GO) test -race $(PKG)
 
 # ------------------------------------------------------------
@@ -136,6 +149,7 @@ release-build:
 test-integration:
 	@echo "==> Running integration tests (skips if PIA_USERNAME and/or PIA_PASSWORD is not set)"
 	$(GOENV) $(GO) test -tags=integration $(PKG)
+	$(GOENV) $(GO) test -tags=integration $(PKG)
 
 # ------------------------------------------------------------
 # System tests – Docker based
@@ -148,8 +162,13 @@ test-stack:
 
 test-gluetun:
 	@cd system-tests/gluetun && docker compose up --build --abort-on-container-exit --exit-code-from tester
+	@cd system-tests/gluetun && docker compose up --build --abort-on-container-exit --exit-code-from tester
 
 test-gluetun-pf:
+	@cd system-tests/gluetun && PIA_PF=1 docker compose up --build --abort-on-container-exit --exit-code-from tester
+
+test-wireguard-client:
+	@cd system-tests/wireguard-client && docker compose up --build --abort-on-container-exit --exit-code-from tester
 	@cd system-tests/gluetun && PIA_PF=1 docker compose up --build --abort-on-container-exit --exit-code-from tester
 
 test-wireguard-client:

@@ -1,4 +1,5 @@
 # PIA WireGuard Config Generator
+# PIA WireGuard Config Generator
 
 <p align="center">
   <strong>Automation-friendly WireGuard config generation for Private Internet Access.</strong>
@@ -60,9 +61,18 @@
 ## What This Does
 
 Private Internet Access (PIA) doesn't provide permanent, static WireGuard configuration files through its user portal.
+Private Internet Access (PIA) doesn't provide permanent, static WireGuard configuration files through its user portal.
 
 Instead, WireGuard connections are created through an authenticated API flow that dynamically provisions the session details needed to build a valid WireGuard configuration.
+Instead, WireGuard connections are created through an authenticated API flow that dynamically provisions the session details needed to build a valid WireGuard configuration.
 
+This tool automates that flow.
+
+It can generate a standard `wg0.conf`, refresh it over time, maintain PIA port-forwarding leases, restart Gluetun when required, and write integration-friendly output files for downstream services.
+
+In short:
+
+> **PIA WireGuard, made practical for infrastructure-style setups.**
 This tool automates that flow.
 
 It can generate a standard `wg0.conf`, refresh it over time, maintain PIA port-forwarding leases, restart Gluetun when required, and write integration-friendly output files for downstream services.
@@ -76,6 +86,7 @@ In short:
 ## Why This Exists
 
 PIA WireGuard is not really a “download once and forget” workflow.
+PIA WireGuard is not really a “download once and forget” workflow.
 
 To establish a tunnel, a client needs to:
 
@@ -86,7 +97,27 @@ To establish a tunnel, a client needs to:
 * generate a WireGuard config,
 * optionally bind a forwarded port,
 * optionally renew that forwarded port over time.
+* authenticate with PIA,
+* register a WireGuard public key,
+* retrieve dynamic connection metadata,
+* select a valid server and region,
+* generate a WireGuard config,
+* optionally bind a forwarded port,
+* optionally renew that forwarded port over time.
 
+That is awkward for:
+
+* Docker stacks,
+* Gluetun containers,
+* Unraid boxes,
+* OpenWrt routers,
+* MikroTik routers,
+* pfSense / OPNsense firewalls,
+* headless Linux servers,
+* long-running VPN gateway containers,
+* P2P setups that depend on port forwarding.
+
+`pia-wg-config-generator` bridges that gap by turning PIA WireGuard into something closer to a repeatable, refreshable and automation-friendly workflow.
 That is awkward for:
 
 * Docker stacks,
@@ -123,8 +154,26 @@ That is awkward for:
 
 > [!IMPORTANT]
 > PIA WireGuard sessions and port-forwarding leases can be ephemeral.
+> PIA WireGuard sessions and port-forwarding leases can be ephemeral.
 >
 > This project is designed around refresh, automation and long-running infrastructure use cases.
+
+---
+
+## Common Use Cases
+
+| Use case                                 | Supported |
+| ---------------------------------------- | --------: |
+| Generate a one-off `wg0.conf`            |       Yes |
+| Use with `wg-quick`                      |       Yes |
+| Use with Gluetun custom WireGuard mode   |       Yes |
+| Run as a refresh daemon                  |       Yes |
+| Maintain PIA port forwarding             |       Yes |
+| Export active forwarded port to file     |       Yes |
+| Restart Gluetun after config refresh     |       Yes |
+| Use on headless Linux servers            |       Yes |
+| Import config into routers/firewalls     |       Yes |
+| Use without the official PIA desktop app |       Yes |
 
 ---
 
@@ -270,8 +319,18 @@ export PATH="$PATH:$(go env GOPATH)/bin"
 You can then run `pia-wg-config` from anywhere.
 
 ### Build From Source
+Make sure your Go bin directory is on your `PATH`:
 
 ```bash
+export PATH="$PATH:$(go env GOPATH)/bin"
+```
+
+You can then run `pia-wg-config` from anywhere.
+
+### Build From Source
+
+```bash
+git clone https://github.com/thecodingrasta/pia-wg-config-generator.git
 git clone https://github.com/thecodingrasta/pia-wg-config-generator.git
 cd pia-wg-config-generator
 make build
@@ -299,8 +358,25 @@ See [Docker / Gluetun](#docker--gluetun) for the full container workflow.
 ---
 
 ## Example: `wg-quick`
+docker build -t pia-wg-config-generator:local .
+```
+
+See [Docker / Gluetun](#docker--gluetun) for the full container workflow.
+
+---
+
+## Example: `wg-quick`
 
 ```bash
+sudo cp wg0.conf /etc/wireguard/wg0.conf
+sudo wg-quick up wg0
+```
+
+To stop the tunnel:
+
+```bash
+sudo wg-quick down wg0
+```
 sudo cp wg0.conf /etc/wireguard/wg0.conf
 sudo wg-quick up wg0
 ```
@@ -343,6 +419,26 @@ pia-wg-config generate \
   --ipv6-mode kill \
   --outfile wg0.conf
 ```
+| Flag                      | Environment variable | Description                                     |
+| ------------------------- | -------------------- | ----------------------------------------------- |
+| `--username`, `-u`        | `PIA_USERNAME`       | PIA account username                            |
+| `--password`, `-w`        | `PIA_PASSWORD`       | PIA account password                            |
+| `--region`, `-r`          |                      | Region ID, friendly name, or server common name |
+| `--outfile`, `-o`         |                      | File to write the config to. Defaults to stdout |
+| `--port-forwarding`, `-p` |                      | Restrict to port-forwarding-capable servers     |
+| `--ipv6-mode`             |                      | `on`, `off`, or `kill`                          |
+| `--server`, `-s`          |                      | Embed server identity as a comment              |
+| `--verbose`, `-v`         |                      | Enable verbose logging                          |
+
+Example:
+
+```bash
+pia-wg-config generate \
+  --region ca_toronto \
+  --port-forwarding \
+  --ipv6-mode kill \
+  --outfile wg0.conf
+```
 
 ---
 
@@ -352,8 +448,29 @@ List available PIA regions.
 
 ```bash
 pia-wg-config regions [options]
+pia-wg-config regions [options]
 ```
 
+| Flag               | Description                               |
+| ------------------ | ----------------------------------------- |
+| `--pf-only`        | Only show port-forwarding-capable regions |
+| `--json`           | Output regions as JSON                    |
+| `--username`, `-u` | PIA username                              |
+| `--password`, `-w` | PIA password                              |
+
+Examples:
+
+```bash
+pia-wg-config regions
+```
+
+```bash
+pia-wg-config regions --pf-only
+```
+
+```bash
+pia-wg-config regions --pf-only --json
+```
 | Flag               | Description                               |
 | ------------------ | ----------------------------------------- |
 | `--pf-only`        | Only show port-forwarding-capable regions |
@@ -414,7 +531,28 @@ pia-wg-config daemon [options]
 | `--ipv6-mode`              |                      |                   `on` | `on`, `off`, or `kill`                                                      |
 | `--server`, `-s`           |                      |                `false` | Embed server identity as a comment                                          |
 | `--verbose`, `-v`          |                      |                `false` | Enable verbose logging                                                      |
+| Flag                       | Environment variable |                Default | Description                                                                 |
+| -------------------------- | -------------------- | ---------------------: | --------------------------------------------------------------------------- |
+| `--username`, `-u`         | `PIA_USERNAME`       |                        | PIA account username                                                        |
+| `--password`, `-w`         | `PIA_PASSWORD`       |                        | PIA account password                                                        |
+| `--region`, `-r`           |                      |         `amsterdam404` | Region ID, friendly name, or server common name                             |
+| `--state-dir`              |                      |               `/state` | Directory for generated state files                                         |
+| `--refresh-interval`       |                      |                  `12h` | How often to regenerate the config                                          |
+| `--refresh-jitter`         |                      |                  `30m` | Random jitter added to refresh timing                                       |
+| `--retry-delay`            |                      |                   `5m` | How long to wait before retrying after a failed refresh                     |
+| `--port-forwarding`, `-p`  |                      |                `false` | Acquire and renew a port-forwarding lease                                   |
+| `--wait-for-gateway`       |                      |                 `true` | Wait for the PIA port-forwarding gateway before requesting a forwarded port |
+| `--gateway-timeout`        |                      |                   `2m` | Maximum time to wait for the PIA gateway after a config refresh             |
+| `--gateway-check-interval` |                      |                   `5s` | How often to check the PIA gateway while waiting                            |
+| `--restart-container`      |                      |                        | Docker container to restart after each config refresh                       |
+| `--docker-socket`          |                      | `/var/run/docker.sock` | Docker socket used by `--restart-container`                                 |
+| `--on-config-change`       |                      |                        | Shell command run after each successful config refresh                      |
+| `--on-port-change`         |                      |                        | Shell command run only when the forwarded port changes                      |
+| `--ipv6-mode`              |                      |                   `on` | `on`, `off`, or `kill`                                                      |
+| `--server`, `-s`           |                      |                `false` | Embed server identity as a comment                                          |
+| `--verbose`, `-v`          |                      |                `false` | Enable verbose logging                                                      |
 
+Daemon output files are written atomically to `--state-dir`.
 Daemon output files are written atomically to `--state-dir`.
 
 | File                        | Description                                            |
@@ -610,6 +748,11 @@ is only reachable through the tunnel.
 | `on`   | Full dual-stack tunnel using IPv4 and IPv6                                          |
 | `off`  | IPv4-only tunnel. IPv6 is not routed through WireGuard                              |
 | `kill` | Dual-stack tunnel with an `ip6tables` rule to block IPv6 traffic outside the tunnel |
+| Mode   | Description                                                                         |
+| ------ | ----------------------------------------------------------------------------------- |
+| `on`   | Full dual-stack tunnel using IPv4 and IPv6                                          |
+| `off`  | IPv4-only tunnel. IPv6 is not routed through WireGuard                              |
+| `kill` | Dual-stack tunnel with an `ip6tables` rule to block IPv6 traffic outside the tunnel |
 
 `kill` mode adds the following rules to the generated config:
 
@@ -617,6 +760,9 @@ is only reachable through the tunnel.
 PostUp = ip6tables -I OUTPUT ! -o %i -j REJECT
 PostDown = ip6tables -D OUTPUT ! -o %i -j REJECT
 ```
+
+> [!NOTE]
+> `kill` mode requires `ip6tables` support on the host/container where the WireGuard config is applied.
 
 > [!NOTE]
 > `kill` mode requires `ip6tables` support on the host/container where the WireGuard config is applied.
@@ -751,10 +897,27 @@ See [`docs/gluetun.md`](docs/gluetun.md) for a service-by-service walkthrough, r
 > [!WARNING]
 > `--restart-container` needs Docker API access. Do not mount `/var/run/docker.sock` into a container that holds your PIA credentials: it is root on the host. Use the restart-only proxy, which allows exactly one call.
 
+> [!WARNING]
+> Mounting the Docker socket gives the daemon access to Docker container control.
+>
+> Only use `--restart-container` in environments where you trust this container and understand the Docker socket security implications.
+
 ---
 
 ## Routers and Firewalls
+## Routers and Firewalls
 
+The generated `wg0.conf` is a standard WireGuard configuration.
+
+It should be portable to WireGuard-compatible systems, including:
+
+* OpenWrt,
+* pfSense,
+* OPNsense,
+* MikroTik RouterOS,
+* ASUS Merlin,
+* Unraid,
+* other WireGuard-compatible routers and firewalls.
 The generated `wg0.conf` is a standard WireGuard configuration.
 
 It should be portable to WireGuard-compatible systems, including:
@@ -781,8 +944,23 @@ AllowedIPs = ...
 Endpoint = ...
 PersistentKeepalive = ...
 ```
+```ini
+[Interface]
+PrivateKey = ...
+Address = ...
+DNS = ...
+
+[Peer]
+PublicKey = ...
+AllowedIPs = ...
+Endpoint = ...
+PersistentKeepalive = ...
+```
 
 Router-specific notes live in [`system-tests/routers/README.md`](system-tests/routers/README.md).
+
+> [!TIP]
+> If you successfully test a platform, please open an issue or discussion with your setup notes so support can be documented properly.
 
 > [!TIP]
 > If you successfully test a platform, please open an issue or discussion with your setup notes so support can be documented properly.
@@ -791,6 +969,7 @@ Router-specific notes live in [`system-tests/routers/README.md`](system-tests/ro
 
 ## Windows Notes
 
+On Windows, PIA’s token endpoint may reject requests made through the system `curl.exe` because of its Schannel TLS behaviour.
 On Windows, PIA’s token endpoint may reject requests made through the system `curl.exe` because of its Schannel TLS behaviour.
 
 If that happens, point the tool at an OpenSSL-linked curl binary:
@@ -876,7 +1055,7 @@ make cover       # unit tests with a coverage total
 Integration tests require real PIA credentials and skip safely without them:
 
 ```bash
-PIA_USERNAME=you PIA_PASSWORD=secret make test-integration
+PIA_USERNAME=whoDis PIA_PASSWORD=superDuperSecretPassword
 ```
 
 Live system tests require Docker and real PIA credentials. They exercise the legacy single `daemon` inside Gluetun's namespace; the four-container stack is checked without credentials by the CI smoke test below.
@@ -886,7 +1065,12 @@ PIA_USERNAME=you \
 PIA_PASSWORD=secret \
 docker compose \
   -f system-tests/gluetun/docker-compose.yml \
+PIA_USERNAME=you \
+PIA_PASSWORD=secret \
+docker compose \
+  -f system-tests/gluetun/docker-compose.yml \
   --env-file system-tests/gluetun/.env \
+  up --build --abort-on-container-exit --exit-code-from tester
   up --build --abort-on-container-exit --exit-code-from tester
 ```
 
@@ -938,7 +1122,11 @@ system-tests/         Docker smoke and live system tests (stack-smoke.sh covers 
 ### Token Acquisition
 
 Token acquisition follows this order:
+### Token Acquisition
 
+Token acquisition follows this order:
+
+1. Use a cached token when available.
 1. Use a cached token when available.
 2. Try curl against PIA’s token endpoint.
 3. Fall back to the metadata server.
@@ -986,7 +1174,9 @@ each refresh:
 ---
 
 ## Roadmap
+## Roadmap
 
+The goal for the v1 release is to stay infrastructure-friendly without overcomplicating the project.
 The goal for the v1 release is to stay infrastructure-friendly without overcomplicating the project.
 
 Planned or potential improvements in the future:
@@ -1056,11 +1246,27 @@ If you're not sure whether something belongs in the project, open a discussion f
 ---
 
 ## Background and Credits
+## Background and Credits
 
+This project is based on the WireGuard workflow documented by Private Internet Access in their open-source [`pia-foss/manual-connections`](https://github.com/pia-foss/manual-connections) repository.
 This project is based on the WireGuard workflow documented by Private Internet Access in their open-source [`pia-foss/manual-connections`](https://github.com/pia-foss/manual-connections) repository.
 
 The initial Go implementation was inspired by [`kylegrantlucas/pia-wg-config`](https://github.com/kylegrantlucas/pia-wg-config), with additional improvements informed by [`Ephemeral-Dust/pia-wg-config`](https://github.com/Ephemeral-Dust/pia-wg-config).
+The initial Go implementation was inspired by [`kylegrantlucas/pia-wg-config`](https://github.com/kylegrantlucas/pia-wg-config), with additional improvements informed by [`Ephemeral-Dust/pia-wg-config`](https://github.com/Ephemeral-Dust/pia-wg-config).
 
+This is also my first Go project, so it's been both a practical infrastructure tool and a solid learning experience.
+
+---
+
+## Disclaimer
+
+> [!WARNING]
+> This project is not affiliated with, sponsored by, or endorsed by Private Internet Access.
+>
+> Private Internet Access, PIA and related marks belong to their respective owners.
+> 
+> Use this project at your own risk. Always review generated configs before using them in production or exposing dependent services to the internet.
+>
 This is also my first Go project, so it's been both a practical infrastructure tool and a solid learning experience.
 
 ---
